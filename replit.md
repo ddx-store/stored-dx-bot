@@ -94,3 +94,46 @@ Generated React Query hooks and fetch client from the OpenAPI spec (e.g. `useHea
 ### `scripts` (`@workspace/scripts`)
 
 Utility scripts package. Each script is a `.ts` file in `src/` with a corresponding npm script in `package.json`. Run scripts via `pnpm --filter @workspace/scripts run <script>`. Scripts can import any workspace package (e.g., `@workspace/db`) by adding it as a dependency in `scripts/package.json`.
+
+## bot_system — Telegram Registration Bot (Python)
+
+Standalone Python system for automated account creation and OTP verification on your own website.
+
+### Runtime
+- Python 3.11 (via Replit module `python-3.11`)
+- Install deps: `python3.11 -m pip install -r bot_system/requirements.txt`
+- Run: `python3.11 bot_system/app/main.py`
+
+### Structure
+```
+bot_system/
+  app/
+    bot/          # Telegram command handlers and PTB Application wiring
+    core/         # Config (env vars), enums, logger, utils
+    gmail/        # Gmail API client, OTP polling watcher, regex parser, matcher
+    jobs/         # JobManager, background thread Scheduler
+    services/     # RegistrationService (orchestrator), NotificationService, OtpService
+    site/         # SiteIntegrationBase (ABC), ApiClient (HTTP), PlaywrightClient (browser)
+    storage/      # SQLite DB init, dataclass models, repositories
+    main.py       # Entry point
+  tests/          # pytest unit tests (20 passing, no credentials needed)
+  requirements.txt
+  .env.example    # All config variables with documentation
+  README.md
+```
+
+### Key files to edit
+- `app/site/api_client.py` — plug in your site's endpoint URLs and request/response shapes
+- `app/site/playwright_client.py` — CSS selectors and URLs for browser fallback
+- `.env.example` → copy to `.env` and fill in tokens/keys
+
+### Tests
+```bash
+cd bot_system
+TELEGRAM_BOT_TOKEN=test SITE_API_BASE_URL=https://example.com python3.11 -m pytest tests/ -v
+```
+
+### Config variables (all via env / Replit Secrets)
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE`,
+`GMAIL_OTP_LABEL`, `SITE_API_BASE_URL`, `SITE_API_KEY`, `SITE_INTEGRATION_MODE`,
+`OTP_TIMEOUT_SECONDS`, `OTP_POLL_INTERVAL_SECONDS`, `OTP_MAX_ATTEMPTS`, `DB_PATH`, `LOG_LEVEL`

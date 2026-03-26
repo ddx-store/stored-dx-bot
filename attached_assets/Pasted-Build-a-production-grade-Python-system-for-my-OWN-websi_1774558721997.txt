@@ -1,0 +1,279 @@
+Build a production-grade Python system for my OWN website only. This is authorized automation for account creation and OTP verification on infrastructure I control.
+
+You are a senior Python backend engineer and automation architect. Design and implement a Telegram-based account creation workflow with Gmail OTP auto-verification.
+
+## Core idea
+
+I already have:
+- A Telegram bot
+- A Gmail inbox
+- Duck email aliases forwarded into my main Gmail
+- OTP emails already arrive in Gmail successfully
+
+I want a new feature where I can send the bot:
+- email
+- secret/password
+
+Then the system should:
+1. Receive the request from Telegram
+2. Start account creation on my website
+3. If my website triggers OTP verification by email, automatically wait for the OTP email in Gmail
+4. Read the OTP from a specific Gmail label or filtered inbox
+5. Submit the OTP back to my website automatically
+6. Confirm that the account is verified / logged in / ready
+7. Send the final result back to Telegram
+
+This must work ONLY for my own website and must be designed for authorized internal use.
+
+## Preferred implementation strategy
+
+Use direct API integration with my website backend if possible.
+Do NOT rely on browser automation unless API access is unavailable.
+Architect the project so that the website integration layer is abstracted:
+- preferred: HTTP API client
+- optional fallback: Playwright browser client
+
+## Main workflow
+
+Telegram Bot
+-> receives email + password/secret
+-> creates a job
+-> calls my site integration layer
+-> starts registration
+-> waits for OTP email in Gmail
+-> reads the matching OTP message
+-> extracts the OTP code
+-> submits the OTP to my site
+-> confirms success or failure
+-> sends a final status message on Telegram
+
+## Required features
+
+### 1) Telegram Bot interface
+Implement commands or message handling for:
+- single account creation
+- batch creation from multiple email lines
+- status check
+- retry failed job
+- recent jobs list
+
+Accepted input examples:
+- /create email@example.com MyPassword123
+- /batch_create followed by multiple lines:
+  email1@example.com password1
+  email2@example.com password2
+
+The bot should respond with:
+- job accepted
+- current status
+- final success/failure
+- failure reason if available
+
+### 2) Job orchestration
+Implement a clean job manager with persistent state.
+
+Each job must have statuses such as:
+- pending
+- creating_account
+- waiting_for_otp
+- verifying_otp
+- completed
+- failed
+
+Track:
+- job_id
+- email
+- current status
+- created_at
+- updated_at
+- error_message
+- otp_attempts
+- final result
+
+### 3) Gmail OTP watcher
+Use Gmail API, not IMAP.
+Read from a specific Gmail label dedicated to OTP emails.
+
+Requirements:
+- fetch unread or recent emails from the configured Gmail label
+- detect the correct email for the current job
+- filter by sender, subject pattern, timestamp, and intended recipient when possible
+- extract OTP code or activation link from the email body
+- mark processed emails to avoid duplicate reuse
+- support polling with retry + timeout
+- structure the code so push notifications can be added later if needed
+
+Important:
+Multiple jobs may run close together, so the OTP matching logic must avoid mixing codes between jobs.
+Use:
+- target email address
+- time window
+- known sender
+- subject filters
+- recent message ordering
+- message deduplication
+
+### 4) Website integration layer
+Build a provider-style abstraction for the website integration.
+
+Create an interface like:
+- create_account(email, password)
+- request_otp(email)
+- submit_otp(email, otp)
+- finalize_account(email)
+- get_account_status(email)
+
+Provide:
+1. API-based implementation as the primary method
+2. optional browser-based implementation stub or fallback using Playwright, isolated in a separate module
+
+Do not hardcode my site logic everywhere.
+Keep the site integration replaceable and modular.
+
+### 5) OTP extraction
+Implement a parser that can extract:
+- numeric OTP codes
+- activation links
+- fallback patterns if the email format changes slightly
+
+Support regex-based extraction with configurable patterns.
+
+### 6) Storage
+Use SQLite for persistence.
+
+Suggested tables:
+- jobs
+- otp_messages
+- results
+- audit_logs
+
+Store:
+- raw email metadata
+- parsed OTP value
+- matched job_id
+- processing result
+- timestamps
+
+### 7) Logging and reliability
+Add structured logging.
+Handle:
+- Gmail API failures
+- network timeouts
+- invalid OTP
+- expired OTP
+- duplicate account
+- account already exists
+- rate limiting
+- temporary backend failures
+
+Add retry logic where sensible.
+Never fail silently.
+All important actions must be logged.
+
+### 8) Configuration
+Use environment variables and a config module.
+
+Expected config items:
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_ALLOWED_USER_IDS
+- GMAIL_CREDENTIALS_FILE
+- GMAIL_TOKEN_FILE
+- GMAIL_OTP_LABEL
+- SITE_API_BASE_URL
+- SITE_API_KEY or AUTH TOKEN
+- OTP_TIMEOUT_SECONDS
+- OTP_POLL_INTERVAL_SECONDS
+- DB_PATH
+- LOG_LEVEL
+
+### 9) Security and scope
+This system is only for my own website and infrastructure.
+Do not build anything for third-party websites.
+Do not add features intended for abuse, mass signups on external sites, captcha bypass, credential stuffing, or anything unrelated to my owned system.
+
+### 10) Code quality requirements
+- Python 3.11+
+- production-oriented code
+- strong typing
+- modular architecture
+- no giant single-file script
+- clear separation of concerns
+- docstrings where useful
+- concise comments where needed
+- no placeholder pseudo-code for core logic
+
+## Suggested project structure
+
+project/
+  app/
+    bot/
+      handlers.py
+      commands.py
+      telegram_client.py
+    core/
+      config.py
+      logger.py
+      enums.py
+      utils.py
+    jobs/
+      job_manager.py
+      state_machine.py
+      scheduler.py
+    gmail/
+      gmail_client.py
+      otp_watcher.py
+      parser.py
+      matcher.py
+    site/
+      base.py
+      api_client.py
+      playwright_client.py
+    storage/
+      db.py
+      models.py
+      repositories.py
+    services/
+      registration_service.py
+      otp_service.py
+      notification_service.py
+    main.py
+  tests/
+  requirements.txt
+  .env.example
+  README.md
+
+## Deliverables
+
+Return all of the following:
+1. architecture summary
+2. final project structure
+3. complete implementation code
+4. SQLite schema
+5. Gmail API integration setup instructions
+6. Telegram bot command flow
+7. example .env file
+8. retry/error-handling strategy
+9. test plan
+10. README with run instructions
+
+## Implementation details to follow
+
+- Start with API-first design for my website
+- Keep browser automation optional and isolated
+- Use Gmail label polling first because it is simpler and sufficient initially
+- Match OTPs safely to the correct job
+- Send useful Telegram replies such as:
+  - Job started
+  - Waiting for OTP
+  - OTP received
+  - Verification succeeded
+  - Verification failed: reason
+
+## Final output expectations
+
+I do NOT want a vague explanation only.
+I want a practical, implementation-ready project.
+Generate real code structure, real modules, and a maintainable design.
+Optimize for reliability, clarity, and ease of deployment on Replit.
+
+If any website-specific API details are missing, create a clean adapter interface and mark exactly where I need to plug in my endpoint URLs and payload formats.

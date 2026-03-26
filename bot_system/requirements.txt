@@ -1,0 +1,21 @@
+# Core bot
+python-telegram-bot==21.7
+
+# Gmail API
+google-api-python-client==2.139.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.1
+
+# HTTP client (site integration)
+requests==2.32.3
+urllib3==2.2.3
+
+# Typing / stdlib extras (Python 3.11+ has most built-in)
+# No extra typing packages required
+
+# Optional: browser automation fallback
+# playwright==1.47.0   # Uncomment if SITE_INTEGRATION_MODE=playwright
+
+# Development / testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
