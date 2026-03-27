@@ -526,12 +526,13 @@ class PlaywrightClient:
                     page_url=page.url,
                 )
 
-            date_filled = await self._try_fill_date_picker(page)
+            seg_filled = await self._try_fill_segmented_birthday(page)
+            date_filled = await self._try_fill_date_picker(page) if seg_filled == 0 else 0
 
             filled_count = await self._smart_fill(
                 page, email, password, first, last, username, phone
             )
-            filled_count += date_filled
+            filled_count += date_filled + seg_filled
 
             if filled_count == 0:
                 body_fill = await self._try_fill_by_page_context(page, email, first, last, username, phone)
@@ -826,8 +827,121 @@ class PlaywrightClient:
                         log.info("-> BUTTON: type=%s text=%s", btn_type, text.replace("\n", " "))
                 except Exception:
                     continue
+
+            spinbuttons = await page.query_selector_all('[role="spinbutton"]')
+            for sb in spinbuttons:
+                try:
+                    if await sb.is_visible():
+                        aria = await sb.get_attribute("aria-label") or ""
+                        text = (await sb.inner_text())[:20]
+                        log.info("-> SPINBUTTON: aria=%s text=%s", aria, text)
+                except Exception:
+                    continue
+
+            num_inputs = await page.query_selector_all('input[inputmode="numeric"]')
+            for ni in num_inputs:
+                try:
+                    if await ni.is_visible():
+                        name = await ni.get_attribute("name") or ""
+                        maxlen = await ni.get_attribute("maxlength") or ""
+                        val = await ni.input_value()
+                        log.info("-> NUMERIC_INPUT: name=%s maxlen=%s val=%s", name, maxlen, val)
+                except Exception:
+                    continue
         except Exception as exc:
             log.debug("Dump page error: %s", exc)
+
+    async def _try_fill_segmented_birthday(self, page) -> int:
+        filled = 0
+        try:
+            spinbuttons = await page.query_selector_all('[role="spinbutton"]')
+            visible_spins = []
+            for sb in spinbuttons:
+                try:
+                    if await sb.is_visible():
+                        visible_spins.append(sb)
+                except Exception:
+                    continue
+
+            if len(visible_spins) >= 3:
+                vals = ["06", "15", "1995"]
+                for i, sb in enumerate(visible_spins[:3]):
+                    try:
+                        await sb.click()
+                        await asyncio.sleep(0.1)
+                        await sb.evaluate(f'(el) => {{ el.textContent = "{vals[i]}"; }}')
+                        await sb.dispatch_event("input")
+                        await sb.dispatch_event("change")
+                        filled += 1
+                    except Exception:
+                        try:
+                            await sb.press("Control+a")
+                            await sb.type(vals[i], delay=50)
+                            filled += 1
+                        except Exception:
+                            pass
+                if filled > 0:
+                    log.info("-> Filled %d segmented birthday spinbuttons", filled)
+                return filled
+
+            num_inputs = await page.query_selector_all('input[inputmode="numeric"]')
+            visible_nums = []
+            for ni in num_inputs:
+                try:
+                    if await ni.is_visible():
+                        val = await ni.input_value()
+                        visible_nums.append((ni, val))
+                except Exception:
+                    continue
+
+            if len(visible_nums) >= 3:
+                vals = ["06", "15", "1995"]
+                for i, (ni, current_val) in enumerate(visible_nums[:3]):
+                    try:
+                        await ni.click()
+                        await asyncio.sleep(0.1)
+                        await ni.fill("")
+                        await ni.type(vals[i], delay=50)
+                        filled += 1
+                    except Exception:
+                        pass
+                if filled > 0:
+                    log.info("-> Filled %d segmented birthday numeric inputs", filled)
+                return filled
+
+            body = ""
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                pass
+            if any(kw in body for kw in ["birthday", "date of birth", "confirm your age"]):
+                small_inputs = await page.query_selector_all(
+                    'input[maxlength="2"], input[maxlength="4"], '
+                    'input[size="2"], input[size="4"]'
+                )
+                visible_small = []
+                for si in small_inputs:
+                    try:
+                        if await si.is_visible():
+                            visible_small.append(si)
+                    except Exception:
+                        continue
+                if len(visible_small) >= 3:
+                    vals = ["06", "15", "1995"]
+                    for i, si in enumerate(visible_small[:3]):
+                        try:
+                            await si.click()
+                            await asyncio.sleep(0.1)
+                            await si.fill(vals[i])
+                            filled += 1
+                        except Exception:
+                            pass
+                    if filled > 0:
+                        log.info("-> Filled %d segmented birthday small inputs", filled)
+
+        except Exception as exc:
+            log.debug("Segmented birthday error: %s", exc)
+        return filled
 
     async def _try_fill_date_picker(self, page) -> int:
         filled = 0
@@ -1592,14 +1706,24 @@ class PlaywrightClient:
                 if inp_type == "checkbox" or inp_type == "radio":
                     continue
 
-                if inp_type == "date" or any(k in hint for k in [
-                    "birth", "dob", "age", "تاريخ", "birthday",
+                if inp_type == "number" and any(k in hint for k in ["age", "عمر"]):
+                    if "age" not in filled_types:
+                        await self._fill_field(inp, "25")
+                        filled.append("age=25")
+                        filled_types.add("age")
+                        filled_types.add("dob")
+                elif inp_type == "date" or any(k in hint for k in [
+                    "birth", "dob", "تاريخ", "birthday",
                     "date_of_birth", "date-of-birth", "dateofbirth",
                     "bday", "born",
                 ]):
                     if "dob" not in filled_types:
-                        await self._fill_field(inp, "1995-06-15")
-                        filled.append("dob=1995-06-15")
+                        if inp_type == "number":
+                            await self._fill_field(inp, "25")
+                            filled.append("age=25")
+                        else:
+                            await self._fill_field(inp, "1995-06-15")
+                            filled.append("dob=1995-06-15")
                         filled_types.add("dob")
                 elif inp_type == "email" or "email" in hint or "mail" in hint:
                     if "email" not in filled_types:
