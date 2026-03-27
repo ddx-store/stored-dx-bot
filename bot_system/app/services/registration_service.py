@@ -1,11 +1,3 @@
-"""
-Registration service — orchestrates the full create-account flow.
-
-Uses Playwright with system Chromium for real browser automation.
-Sends real-time step-by-step updates to the user via Telegram.
-OTP codes are filled directly into the website's verification form.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +30,7 @@ class RegistrationService:
 
         try:
             self._jobs.transition(job.job_id, JobStatus.CREATING_ACCOUNT)
-            self._notify.step(job, "1️⃣", f"جاري فتح الموقع {job.site_url}")
+            self._notify.step(job, "1️⃣", "جاري فتح الموقع...")
 
             if not job.site_url:
                 raise RuntimeError("لم يتم تحديد الموقع")
@@ -69,7 +61,7 @@ class RegistrationService:
                 )
             except asyncio.TimeoutError:
                 raise RuntimeError(
-                    f"انتهى الوقت ({JOB_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل"
+                    f"انتهى الوقت ({JOB_TIMEOUT}ث) -- الموقع بطيء أو لم أجد نموذج تسجيل"
                 )
             finally:
                 loop.close()
@@ -81,10 +73,15 @@ class RegistrationService:
                 raise RuntimeError(result.message)
 
             if result.needs_otp and not has_gmail:
-                self._notify.step(job, "3️⃣", "تم ملء النموذج وإرساله")
-                self._finish(job, "تم التسجيل -- يحتاج تحقق يدوي (Gmail غير مربوط)")
+                detail = "تم التسجيل -- يحتاج تحقق يدوي (Gmail غير مربوط)"
             else:
-                self._finish(job, result.message or "تم إنشاء الحساب")
+                detail = result.message or "تم إنشاء الحساب بنجاح"
+
+            self._jobs.complete(job.job_id, detail)
+            self._results.save(Result(job_id=job.job_id, success=True, detail=detail))
+            job.final_result = detail
+            self._notify.complete(job, detail)
+            log.info("Job %s DONE: %s", job.job_id, detail)
 
         except Exception as exc:
             msg = str(exc)[:200]
@@ -94,7 +91,7 @@ class RegistrationService:
             except Exception:
                 log.error("Failed to update job status for %s", job.job_id)
             try:
-                self._notify.step(job, "❌", f"فشل: {msg}")
+                self._notify.fail(job, msg)
             except Exception as notify_exc:
                 log.error("CRITICAL: Could not notify user: %s", notify_exc)
 
@@ -128,10 +125,3 @@ class RegistrationService:
             return {"code": otp_code, "link": otp_link}
 
         return provider
-
-    def _finish(self, job: Job, detail: str) -> None:
-        self._jobs.complete(job.job_id, detail)
-        self._results.save(Result(job_id=job.job_id, success=True, detail=detail))
-        job.final_result = detail
-        self._notify.step(job, "✅", f"اكتمل!\n{detail}")
-        log.info("Job %s DONE: %s", job.job_id, detail)

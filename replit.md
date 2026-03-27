@@ -2,7 +2,7 @@
 
 ## Overview
 
-Python Telegram bot (@STOREDDXBOT) that auto-registers accounts on any website using Playwright + headless Chromium. Accepts `/create site.com email@example.com`, navigates the site, fills registration forms, submits, and reports results via Telegram in real-time.
+Python Telegram bot (@STOREDDXBOT) that auto-registers accounts on any website using Playwright + headless Chromium. Users pick a site from inline buttons or use `/create site.com email@example.com`. The bot fills registration forms, handles OTP, and reports progress via a single editable Telegram message.
 
 ## Stack
 
@@ -11,46 +11,49 @@ Python Telegram bot (@STOREDDXBOT) that auto-registers accounts on any website u
 - **Browser automation**: Playwright 1.58 + system Chromium (via Nix)
 - **Email**: Gmail IMAP (App Password, no OAuth)
 - **Database**: SQLite (WAL mode)
-- **Deployment**: Docker (Railway-ready), also runs on Replit
 
 ## Project Structure
 
 ```
-bot_system/                    # The actual application
+bot_system/
   app/
-    bot/                       # Telegram handlers, commands, client
-    core/                      # Config, logging, enums, utils
-    gmail/                     # IMAP client, OTP parser, matcher
-    jobs/                      # Job manager, background scheduler
-    services/                  # Registration, notification, OTP services
-    site/                      # PlaywrightClient (main), HttpSiteClient (fallback)
-    storage/                   # SQLite DB, models, repositories
-    main.py                    # Entry point (chdir to bot_system/, dotenv, polling)
-  requirements.txt
-  .env.example
-Dockerfile                     # Railway/Docker deployment (Chromium + Python)
-Procfile                       # Alternative Railway deployment
-railway.toml                   # Railway config
-README.md                      # GitHub-facing docs
+    bot/
+      commands.py          # /start, /create, inline keyboard, callback + text handlers
+      handlers.py          # Handler registration (commands, callbacks, text)
+      telegram_client.py   # send_message, edit_message, delete_message wrappers
+    core/                  # Config, logging, enums, utils
+    gmail/                 # IMAP client, OTP parser, matcher
+    jobs/                  # Job manager, background scheduler
+    services/
+      notification_service.py  # Single-message progress (edit in-place)
+      registration_service.py  # Orchestrates Playwright + OTP flow
+    site/
+      playwright_client.py     # Main browser automation engine
+    storage/               # SQLite DB, models, repositories
+    main.py                # Entry point
 ```
-
-**Replit scaffold (not part of the bot)**:
-- `artifacts/`, `lib/`, `scripts/`, root `package.json`, `pnpm-workspace.yaml`, `tsconfig*.json`
-- These are .gitignored and will not appear on GitHub
 
 ## How It Works
 
-1. User sends `/create https://site.com user@email.com` to the bot
-2. Bot creates a job, launches Playwright with headless Chromium
-3. PlaywrightClient navigates to the site, finds registration form via heuristics
-4. Auto-fills fields (name, phone, email, password) based on field attributes
-5. Submits form, monitors API responses and page changes
-6. Reports success/failure back to user with real-time progress updates
-7. (Optional) If OTP needed: polls Gmail IMAP for verification codes
+1. User presses /start and picks a site from inline buttons (ChatGPT, Google, etc.)
+2. Bot asks for email only — user sends email text
+3. Bot creates a job, sends a single progress message with step indicators
+4. PlaywrightClient navigates to site, finds registration form, fills fields
+5. Progress message updates in-place (edit, not new messages) showing step-by-step status
+6. OTP: polls Gmail IMAP, types code into verification form
+7. Final message shows all steps checked off with success/failure result
+
+## UI Design
+
+- **Inline keyboard** with preset sites (ChatGPT, Google, Outlook, GitHub, Discord, X) + "custom site" option
+- **Single editable message** for progress — 6-step checklist updated via `edit_message`
+- Steps: فتح الموقع → البحث عن التسجيل → تعبئة البيانات → إرسال النموذج → التحقق من البريد → إكمال الملف
+- Icons: ⬜ pending, ⏳ in-progress, ✅ done, ❌ failed
+- No Job IDs shown to user — clean professional look
 
 ## Key Configuration
 
-All settings via environment variables (see `bot_system/.env.example`):
+All settings via environment variables:
 
 | Variable | Purpose |
 |---|---|
@@ -59,30 +62,18 @@ All settings via environment variables (see `bot_system/.env.example`):
 | `FIXED_PASSWORD` | Password for all registrations (default: Hh123456789Hh) |
 | `GMAIL_USER` | Gmail address for IMAP OTP polling |
 | `GMAIL_APP_PASSWORD` | Gmail App Password (16 chars) |
-| `DB_PATH` | SQLite path (default: data/jobs.db, relative to bot_system/) |
+| `DB_PATH` | SQLite path (default: data/jobs.db) |
 
 ## Running
 
 **Replit**: Workflow "Telegram Bot" runs `python3.11 bot_system/app/main.py`
-**Docker**: `docker build -t regbot . && docker run --env-file bot_system/.env regbot`
-**Railway**: Push to GitHub, connect repo, Railway auto-detects Dockerfile
 
 ## Important Notes
 
-- `main.py` does `os.chdir()` to `bot_system/` so all relative paths work from there
-- ALL Telegram messages use plain text (no Markdown) — URLs with `_` break Markdown silently
-- `drop_pending_updates=True` means commands sent during restart are lost — user must resend
-- System Chromium found via `CHROMIUM_PATH` env var or `shutil.which("chromium")`
-- PlaywrightClient timeouts: 8s nav + 50s internal + 60s job-level
-- `_smart_submit` filters out OAuth buttons (Google, Microsoft, Apple, etc.) to click correct submit
-- API URL matching uses `urlparse(url).path` only, not query params (avoids false positives)
-- Multi-step forms: `_wait_for_inputs()` polls up to 8s for SPA-rendered inputs between steps
-- Navigation: tries signup buttons first, then register links (avoids clicking login links first)
-- OTP flow: browser stays open after registration, receives code from Gmail, types it into verification form, and submits
-- `_fill_otp_code`: handles single-input OTP fields AND individual digit inputs (maxlength=1)
-- `_open_verification_link`: opens verification links in Playwright browser instead of urllib
-- `otp_provider` callback: async function passed to register(), polls Gmail via thread executor
-- JOB_TIMEOUT=200s, GLOBAL_TIMEOUT=180s to accommodate OTP polling (up to 120s)
-- `_continue_profile_setup`: after OTP verification, continues filling any remaining forms (Create Profile, About You, etc.) up to 5 additional steps
-- `_find_skip_button`: detects and clicks skip/later/dismiss buttons when forms can't be filled
-- Profile continuation also triggers after successful non-OTP registration if more inputs appear
+- JOB_TIMEOUT=350s, GLOBAL_TIMEOUT=300s to accommodate OTP polling
+- ALL Telegram messages use plain text (no Markdown)
+- `_click_confirm_dialog`: clicks OK/Done/Got It dialogs after registration
+- `_try_url_smart`: accepts email-only forms (not just email+password)
+- Spinbutton birthday fill uses keyboard input (type + Tab) for React compatibility
+- `_DIRECT_AUTH_URLS` map for sites like ChatGPT that need direct auth URLs
+- Preset sites configurable in `PRESET_SITES` list in commands.py

@@ -39,7 +39,7 @@ class Scheduler:
                 log.error("Background job %s raised an uncaught exception: %s", job.job_id, exc)
                 try:
                     from app.services.notification_service import NotificationService
-                    NotificationService().step(job, "❌", f"خطأ غير متوقع: {exc}")
+                    NotificationService().fail(job, f"خطأ غير متوقع: {exc}")
                 except Exception as notify_exc:
                     log.error("Failed to notify user about crash: %s", notify_exc)
             self._futures.pop(job.job_id, None)

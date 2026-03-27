@@ -1,14 +1,10 @@
-"""
-Thin wrapper around python-telegram-bot.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import threading
 from typing import Optional
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup
 from telegram.ext import Application
 
 from app.core.config import config
@@ -45,19 +41,45 @@ def get_bot() -> Bot:
     return _app.bot
 
 
-def send_message(chat_id: int, text: str) -> None:
-    """Send a plain-text message from any thread via the main PTB event loop."""
-    bot = get_bot()
-    coro = bot.send_message(chat_id=chat_id, text=text)
+def _run_coro(coro):
     try:
         if _main_loop is not None and _main_loop.is_running():
             future = asyncio.run_coroutine_threadsafe(coro, _main_loop)
-            future.result(timeout=15)
+            return future.result(timeout=15)
         else:
             loop = asyncio.new_event_loop()
             try:
-                loop.run_until_complete(coro)
+                return loop.run_until_complete(coro)
             finally:
                 loop.close()
     except Exception as exc:
-        log.error("send_message failed: %s", exc)
+        log.error("Telegram API call failed: %s", exc)
+        return None
+
+
+def send_message(chat_id: int, text: str, reply_markup=None) -> Optional[int]:
+    bot = get_bot()
+    coro = bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    result = _run_coro(coro)
+    if result:
+        return result.message_id
+    return None
+
+
+def edit_message(chat_id: int, message_id: int, text: str, reply_markup=None) -> bool:
+    bot = get_bot()
+    coro = bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        reply_markup=reply_markup,
+    )
+    result = _run_coro(coro)
+    return result is not None
+
+
+def delete_message(chat_id: int, message_id: int) -> bool:
+    bot = get_bot()
+    coro = bot.delete_message(chat_id=chat_id, message_id=message_id)
+    result = _run_coro(coro)
+    return result is not None
