@@ -455,13 +455,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "║   🌐  إضافة بروكسي            ║\n"
             "╚══════════════════════════════╝\n"
             "\n"
-            "  ارسل رابط البروكسي بالتنسيق:\n"
+            "  التنسيقات المدعومة:\n"
+            "\n"
+            "  host:port:user:pass\n"
+            "  px.server.com:10780:user:pass\n"
+            "\n"
             "  socks5://user:pass@host:port\n"
             "  http://user:pass@host:port\n"
             "  http://host:port\n"
             "\n"
-            "  أو أرسله مع تسمية:\n"
-            "  socks5://host:1080 | اسم البروكسي\n",
+            "  اختياري — أضف تسمية بعد |\n"
+            "  host:port:user:pass | اسم\n",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ رجوع", callback_data="menu:proxies")]]),
         )
         return
@@ -634,21 +638,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parts = raw.split("|", 1)
             raw = parts[0].strip()
             label = parts[1].strip()
-        if not re.match(r"^(https?|socks5|socks4)://", raw):
+        proxy_url, parse_err = _parse_proxy_url(raw)
+        if parse_err:
             await update.message.reply_text(
-                "  ❌ التنسيق غير صحيح.\n"
-                "  مثال: socks5://user:pass@host:1080\n"
-                "  أو: http://host:port\n"
+                f"  ❌ {parse_err}\n"
+                "\n"
+                "  التنسيقات المدعومة:\n"
+                "  host:port:user:pass\n"
+                "  socks5://user:pass@host:port\n"
+                "  http://host:port\n"
             )
             return
         from app.storage.repositories import ProxyRepository
         repo = ProxyRepository()
-        repo.add(raw, label)
-        proxies = repo.list_all()
-        count_active = sum(1 for p in proxies if p.active)
+        repo.add(proxy_url, label)
         await update.message.reply_text(
             "  ✅ تم إضافة البروكسي\n"
-            f"  {label or raw[:50]}\n"
+            f"  {label or proxy_url[:60]}\n"
             "\n"
             "  /proxies لإدارة البروكسيات\n"
         )
@@ -885,6 +891,36 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             plan_name=payment.get("plan", ""),
         )
         return
+
+
+def _parse_proxy_url(raw: str):
+    """
+    Parse a proxy string into a standard URL.
+    Supported formats:
+      host:port:user:pass   → http://user:pass@host:port
+      host:port             → http://host:port
+      scheme://[user:pass@]host:port  → as-is
+    Returns (proxy_url, error) tuple.
+    """
+    raw = raw.strip()
+    if re.match(r"^(https?|socks5|socks4)://", raw):
+        if not re.search(r":\d+$", raw.rstrip("/")):
+            return None, "يجب أن يحتوي الرابط على رقم المنفذ (port)"
+        return raw, None
+    parts = raw.split(":")
+    if len(parts) == 4:
+        host, port, user, password = parts
+        if not port.isdigit():
+            return None, "رقم المنفذ (port) يجب أن يكون رقماً"
+        from urllib.parse import quote
+        proxy_url = f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}"
+        return proxy_url, None
+    if len(parts) == 2:
+        host, port = parts
+        if not port.isdigit():
+            return None, "رقم المنفذ (port) يجب أن يكون رقماً"
+        return f"http://{host}:{port}", None
+    return None, "التنسيق غير صحيح — استخدم: host:port:user:pass أو socks5://user:pass@host:port"
 
 
 _FIRST_NAMES = [
