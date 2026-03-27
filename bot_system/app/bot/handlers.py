@@ -6,6 +6,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
 from app.bot.commands import (
+    cmd_accounts,
+    cmd_cancel,
     cmd_create,
     cmd_help,
     cmd_jobs,
@@ -35,6 +37,8 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("pay", cmd_pay))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("accounts", cmd_accounts))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(error_handler)

@@ -12,6 +12,7 @@ class JobStatus(str, Enum):
     VERIFYING_OTP = "verifying_otp"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class JobType(str, Enum):

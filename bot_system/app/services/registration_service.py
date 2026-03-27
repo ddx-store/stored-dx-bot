@@ -11,8 +11,8 @@ from app.gmail.otp_watcher import OtpTimeout, OtpWatcher
 from app.jobs.job_manager import JobManager
 from app.services.notification_service import NotificationService
 from app.site.playwright_client import PlaywrightClient
-from app.storage.models import Job, Result
-from app.storage.repositories import ResultRepository
+from app.storage.models import Job, Result, SavedAccount
+from app.storage.repositories import ResultRepository, SavedAccountRepository
 
 log = get_logger(__name__)
 
@@ -24,19 +24,27 @@ class RegistrationService:
         self._jobs = JobManager()
         self._notify = NotificationService()
         self._results = ResultRepository()
+        self._saved = SavedAccountRepository()
 
     def run_job(self, job: Job, password: str) -> None:
         log.info("START job=%s site=%s email=%s", job.job_id, job.site_url, job.email)
 
         try:
+            from app.jobs.scheduler import scheduler
+            if scheduler.is_cancelled(job.job_id):
+                self._handle_cancel(job)
+                return
+
             self._jobs.transition(job.job_id, JobStatus.CREATING_ACCOUNT)
-            self._notify.step(job, "1️⃣", "جاري فتح الموقع...")
+            self._notify.step(job, "1\ufe0f\u20e3", "جاري فتح الموقع...")
 
             if not job.site_url:
                 raise RuntimeError("لم يتم تحديد الموقع")
 
             def on_progress(msg: str):
-                self._notify.step(job, "🔄", msg)
+                if scheduler.is_cancelled(job.job_id):
+                    raise RuntimeError("__CANCELLED__")
+                self._notify.step(job, "\U0001f504", msg)
 
             has_gmail = bool(config.GMAIL_USER and config.GMAIL_APP_PASSWORD)
 
@@ -63,8 +71,17 @@ class RegistrationService:
                 raise RuntimeError(
                     f"انتهى الوقت ({JOB_TIMEOUT}ث) -- الموقع بطيء أو لم أجد نموذج تسجيل"
                 )
+            except RuntimeError as e:
+                if "__CANCELLED__" in str(e):
+                    self._handle_cancel(job)
+                    return
+                raise
             finally:
                 loop.close()
+
+            if scheduler.is_cancelled(job.job_id):
+                self._handle_cancel(job)
+                return
 
             log.info("Playwright result: success=%s otp=%s msg=%s",
                      result.success, result.needs_otp, result.message)
@@ -81,6 +98,19 @@ class RegistrationService:
             self._results.save(Result(job_id=job.job_id, success=True, detail=detail))
             job.final_result = detail
             self._notify.complete(job, detail)
+
+            try:
+                self._saved.save(SavedAccount(
+                    chat_id=job.chat_id or 0,
+                    site_url=job.site_url,
+                    email=job.email,
+                    password=password,
+                    job_type="registration",
+                    detail=detail,
+                ))
+            except Exception as save_exc:
+                log.error("Failed to save account: %s", save_exc)
+
             log.info("Job %s DONE: %s", job.job_id, detail)
 
         except Exception as exc:
@@ -95,13 +125,21 @@ class RegistrationService:
             except Exception as notify_exc:
                 log.error("CRITICAL: Could not notify user: %s", notify_exc)
 
+    def _handle_cancel(self, job: Job) -> None:
+        log.info("Job %s CANCELLED by user", job.job_id)
+        try:
+            self._jobs.transition(job.job_id, JobStatus.CANCELLED)
+        except Exception:
+            pass
+        self._notify.fail(job, "تم إلغاء العملية بواسطة المستخدم")
+
     def _make_otp_provider(self, job: Job, on_progress):
         notify = self._notify
         jobs = self._jobs
 
         async def provider():
             jobs.transition(job.job_id, JobStatus.WAITING_FOR_OTP)
-            notify.step(job, "4️⃣", "بانتظار رمز التحقق من البريد...")
+            notify.step(job, "4\ufe0f\u20e3", "بانتظار رمز التحقق من البريد...")
 
             loop = asyncio.get_event_loop()
             watcher = OtpWatcher()
@@ -121,7 +159,7 @@ class RegistrationService:
                 log.warning("Email received but no OTP/link for job %s", job.job_id)
                 return None
 
-            notify.step(job, "5️⃣", "تم استلام الرمز -- جاري التحقق...")
+            notify.step(job, "5\ufe0f\u20e3", "تم استلام الرمز -- جاري التحقق...")
             return {"code": otp_code, "link": otp_link}
 
         return provider

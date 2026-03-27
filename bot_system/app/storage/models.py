@@ -85,3 +85,16 @@ class AuditLog:
     job_id: Optional[str] = None
     created_at: datetime = field(default_factory=utcnow)
     id: Optional[int] = None
+
+
+@dataclass
+class SavedAccount:
+    chat_id: int
+    site_url: str
+    email: str
+    password: str = ""
+    job_type: str = "registration"
+    plan_name: str = ""
+    detail: Optional[str] = None
+    created_at: datetime = field(default_factory=utcnow)
+    id: Optional[int] = None

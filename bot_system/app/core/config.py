@@ -66,5 +66,9 @@ class Config:
     GMAIL_CREDENTIALS_FILE: str = _optional("GMAIL_CREDENTIALS_FILE", "credentials.json")
     GMAIL_TOKEN_FILE: str = _optional("GMAIL_TOKEN_FILE", "token.json")
 
+    MAX_CONCURRENT_JOBS: int = _int("MAX_CONCURRENT_JOBS", 2)
+    ADMIN_CHAT_ID: int = _int("ADMIN_CHAT_ID", 0)
+    CLEANUP_DAYS: int = _int("CLEANUP_DAYS", 30)
+
 
 config = Config()

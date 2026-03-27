@@ -126,7 +126,7 @@ class JobProgress:
 
         return "\n".join(lines)
 
-    def send_or_update(self):
+    def send_or_update(self, reply_markup=None):
         from app.bot.telegram_client import send_message, edit_message
         text = self._build_text()
         chat_id = self.job.chat_id
@@ -134,13 +134,13 @@ class JobProgress:
             return
 
         if self.message_id:
-            ok = edit_message(chat_id, self.message_id, text)
+            ok = edit_message(chat_id, self.message_id, text, reply_markup=reply_markup)
             if not ok:
-                mid = send_message(chat_id, text)
+                mid = send_message(chat_id, text, reply_markup=reply_markup)
                 if mid:
                     self.message_id = mid
         else:
-            mid = send_message(chat_id, text)
+            mid = send_message(chat_id, text, reply_markup=reply_markup)
             if mid:
                 self.message_id = mid
 
@@ -211,10 +211,14 @@ class NotificationService:
         if not job.chat_id:
             return
         try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             progress = _get_progress(job)
             progress.is_done = True
             progress.result_text = message
-            progress.send_or_update()
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ القائمة الرئيسية", callback_data="back:home")]
+            ])
+            progress.send_or_update(reply_markup=keyboard)
             _cleanup(job.job_id)
         except Exception as exc:
             log.error("Notification complete failed for job %s: %s", job.job_id, exc)
@@ -223,10 +227,26 @@ class NotificationService:
         if not job.chat_id:
             return
         try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             progress = _get_progress(job)
+            is_payment = progress.is_payment
             progress.is_failed = True
             progress.result_text = message
-            progress.send_or_update()
+
+            is_cancel = "إلغاء" in message or "cancel" in message.lower()
+            buttons = []
+            if not is_cancel:
+                site_url = getattr(job, "site_url", "")
+                if site_url:
+                    prefix = "retry_pay" if is_payment else "retry_reg"
+                    buttons.append([InlineKeyboardButton(
+                        "🔄 إعادة المحاولة",
+                        callback_data=f"{prefix}:{site_url}"
+                    )])
+            buttons.append([InlineKeyboardButton("◀ القائمة الرئيسية", callback_data="back:home")])
+            keyboard = InlineKeyboardMarkup(buttons)
+
+            progress.send_or_update(reply_markup=keyboard)
             _cleanup(job.job_id)
         except Exception as exc:
             log.error("Notification fail failed for job %s: %s", job.job_id, exc)

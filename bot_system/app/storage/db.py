@@ -89,6 +89,20 @@ CREATE TABLE IF NOT EXISTS payment_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_pjobs_email  ON payment_jobs (email);
 CREATE INDEX IF NOT EXISTS idx_pjobs_status ON payment_jobs (status);
+
+CREATE TABLE IF NOT EXISTS saved_accounts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id      INTEGER NOT NULL,
+    site_url     TEXT NOT NULL,
+    email        TEXT NOT NULL,
+    password     TEXT NOT NULL DEFAULT '',
+    job_type     TEXT NOT NULL DEFAULT 'registration',
+    plan_name    TEXT NOT NULL DEFAULT '',
+    detail       TEXT,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_chat ON saved_accounts (chat_id);
 """
 
 # Migration: add site_url column to existing databases that don't have it.

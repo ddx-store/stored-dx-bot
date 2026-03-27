@@ -1,16 +1,11 @@
-"""
-Application entry point.
-
-Works in both Replit and Railway/Docker environments.
-Handles graceful shutdown via SIGTERM/SIGINT.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import signal
 import sys
 import os
+import threading
+import time
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -32,6 +27,28 @@ configure_root()
 log = get_logger("main")
 
 
+def _start_cleanup_thread():
+    from app.core.config import config
+    from app.storage.repositories import CleanupRepository
+
+    interval = 6 * 3600
+
+    def worker():
+        while True:
+            try:
+                time.sleep(interval)
+                repo = CleanupRepository()
+                deleted = repo.delete_old_jobs(config.CLEANUP_DAYS)
+                if deleted > 0:
+                    log.info("Auto-cleanup: removed %d old records", deleted)
+            except Exception as exc:
+                log.error("Cleanup thread error: %s", exc)
+
+    t = threading.Thread(target=worker, daemon=True, name="cleanup-worker")
+    t.start()
+    log.info("Cleanup thread started (every %dh, keep %d days)", interval // 3600, config.CLEANUP_DAYS)
+
+
 def main() -> None:
     log.info("Initialising bot system")
 
@@ -43,6 +60,8 @@ def main() -> None:
 
     from app.bot.handlers import register_handlers
     register_handlers(application)
+
+    _start_cleanup_thread()
 
     async def post_init(app):
         loop = asyncio.get_running_loop()

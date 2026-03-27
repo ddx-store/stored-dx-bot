@@ -73,6 +73,7 @@ def _build_home_menu():
     keyboard = [
         [InlineKeyboardButton("📝  إنشاء حساب", callback_data="menu:register")],
         [InlineKeyboardButton("💳  تفعيل حساب", callback_data="menu:activate")],
+        [InlineKeyboardButton("📋  حساباتي", callback_data="menu:accounts")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -121,6 +122,7 @@ def _home_text():
         "║                              ║\n"
         "║   📝  إنشاء حساب جديد        ║\n"
         "║   💳  تفعيل حساب (اشتراك)    ║\n"
+        "║   📋  حساباتي المحفوظة       ║\n"
         "║                              ║\n"
         "╚══════════════════════════════╝\n"
         "\n"
@@ -190,6 +192,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "  /start - القائمة الرئيسية\n"
             "  /create site.com email\n"
             "  /pay - تفعيل حساب\n"
+            "  /cancel - إلغاء العمليات\n"
+            "  /accounts - حساباتي المحفوظة\n"
         )
         await update.message.reply_text(text)
     except Exception as exc:
@@ -293,6 +297,50 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "\n"
             "  ارسل رابط الموقع:\n"
             "  مثال: site.com\n",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data == "menu:accounts":
+        _pending_site.pop(user_id, None)
+        _pending_payment.pop(user_id, None)
+        await _show_accounts(query)
+        return
+
+    if data.startswith("retry_reg:"):
+        site_url = data[10:]
+        _pending_site[user_id] = site_url
+        site_label = site_url
+        for ps in PRESET_SITES:
+            if ps["url"] == site_url:
+                site_label = f"{ps['icon']} {ps['label']}"
+                break
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:regsites")]]
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            f"║  🔄  إعادة - {site_label}\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  📧 ارسل الايميل:\n",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("retry_pay:"):
+        site_url = data[10:]
+        site_label = site_url
+        for ps in PAYMENT_SITES:
+            if ps["url"] == site_url:
+                site_label = f"{ps['icon']} {ps['label']}"
+                break
+        _pending_payment[user_id] = {"step": "email", "site_url": site_url, "label": site_label}
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            f"║  🔄  إعادة - {site_label}\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  📧 ارسل الايميل (حساب الموقع):\n",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -547,6 +595,15 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _start_job(update: Update, raw_site: str, email: str):
+    from app.jobs.scheduler import scheduler
+
+    if scheduler.is_at_limit(update.effective_chat.id):
+        await update.message.reply_text(
+            f"  ⚠️  عندك عمليات جارية (الحد الاقصى {config.MAX_CONCURRENT_JOBS})\n"
+            "  انتظر حتى تنتهي او استخدم /cancel\n"
+        )
+        return
+
     site_url = normalise_url(raw_site)
 
     from app.jobs.job_manager import JobManager
@@ -559,12 +616,20 @@ async def _start_job(update: Update, raw_site: str, email: str):
     )
     log.info("Job created: id=%s email=%s site=%s", job.job_id, email, site_url)
 
-    from app.jobs.scheduler import scheduler
     scheduler.submit(job, config.FIXED_PASSWORD)
     log.info("Job submitted to scheduler: %s", job.job_id)
 
 
 async def _start_payment_job(update: Update, site_url: str, email: str, password: str, card):
+    from app.jobs.scheduler import scheduler
+
+    if scheduler.is_at_limit(update.effective_chat.id):
+        await update.message.reply_text(
+            f"  ⚠️  عندك عمليات جارية (الحد الاقصى {config.MAX_CONCURRENT_JOBS})\n"
+            "  انتظر حتى تنتهي او استخدم /cancel\n"
+        )
+        return
+
     from app.storage.models import PaymentJob
 
     site_url_full = normalise_url(site_url)
@@ -580,7 +645,6 @@ async def _start_payment_job(update: Update, site_url: str, email: str, password
 
     log.info("Payment job created: id=%s email=%s site=%s", job_id, email, site_url_full)
 
-    from app.jobs.scheduler import scheduler
     scheduler.submit_payment(pjob, card)
     log.info("Payment job submitted to scheduler: %s", job_id)
 
@@ -651,3 +715,122 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     except Exception as exc:
         log.error("cmd_jobs error: %s\n%s", exc, traceback.format_exc())
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    try:
+        if not _is_allowed(user.id):
+            await update.message.reply_text("غير مصرح.")
+            return
+
+        _pending_site.pop(user.id, None)
+        _pending_payment.pop(user.id, None)
+
+        from app.jobs.scheduler import scheduler
+        active = scheduler.get_active_jobs_for_chat(update.effective_chat.id)
+
+        if not active:
+            await update.message.reply_text("  لا توجد عمليات جارية للإلغاء.")
+            return
+
+        cancelled = 0
+        for job_id in active:
+            if scheduler.cancel(job_id):
+                cancelled += 1
+
+        if cancelled > 0:
+            await update.message.reply_text(
+                f"  ✅  تم إلغاء {cancelled} عملية جارية.\n"
+            )
+        else:
+            await update.message.reply_text("  لم أتمكن من إلغاء أي عملية.")
+
+    except Exception as exc:
+        log.error("cmd_cancel error: %s\n%s", exc, traceback.format_exc())
+
+
+async def cmd_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    try:
+        if not _is_allowed(user.id):
+            await update.message.reply_text("غير مصرح.")
+            return
+
+        from app.storage.repositories import SavedAccountRepository
+        repo = SavedAccountRepository()
+        accounts = repo.list_by_chat(update.effective_chat.id, limit=20)
+
+        if not accounts:
+            await update.message.reply_text("  لا توجد حسابات محفوظة بعد.")
+            return
+
+        lines = [
+            "╔══════════════════════════════╗",
+            "║       حساباتي المحفوظة       ║",
+            "╚══════════════════════════════╝",
+            "",
+        ]
+
+        for acc in accounts:
+            icon = "📝" if acc.job_type == "registration" else "💳"
+            lines.append(f"  {icon}  {acc.site_url}")
+            lines.append(f"      📧 {acc.email}")
+            if acc.password:
+                lines.append(f"      🔑 {acc.password}")
+            if acc.plan_name:
+                lines.append(f"      📋 {acc.plan_name}")
+            lines.append(f"      📅 {acc.created_at.strftime('%Y-%m-%d %H:%M')}")
+            lines.append("")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception as exc:
+        log.error("cmd_accounts error: %s\n%s", exc, traceback.format_exc())
+
+
+async def _show_accounts(query) -> None:
+    try:
+        from app.storage.repositories import SavedAccountRepository
+        repo = SavedAccountRepository()
+        accounts = repo.list_by_chat(query.from_user.id, limit=20)
+
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:home")]]
+
+        if not accounts:
+            await query.edit_message_text(
+                "╔══════════════════════════════╗\n"
+                "║       حساباتي المحفوظة       ║\n"
+                "╚══════════════════════════════╝\n"
+                "\n"
+                "  لا توجد حسابات محفوظة بعد.\n"
+                "  سيتم حفظ الحسابات تلقائيا عند النجاح.\n",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        lines = [
+            "╔══════════════════════════════╗",
+            "║       حساباتي المحفوظة       ║",
+            "╚══════════════════════════════╝",
+            "",
+        ]
+
+        for acc in accounts:
+            icon = "📝" if acc.job_type == "registration" else "💳"
+            lines.append(f"  {icon}  {acc.site_url}")
+            lines.append(f"      📧 {acc.email}")
+            if acc.password:
+                lines.append(f"      🔑 {acc.password}")
+            if acc.plan_name:
+                lines.append(f"      📋 {acc.plan_name}")
+            lines.append(f"      📅 {acc.created_at.strftime('%Y-%m-%d %H:%M')}")
+            lines.append("")
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as exc:
+        log.error("_show_accounts error: %s\n%s", exc, traceback.format_exc())

@@ -12,7 +12,7 @@ from app.core.enums import JobStatus, OtpType
 from app.core.logger import get_logger
 from app.core.utils import utcnow
 from app.storage.db import get_connection
-from app.storage.models import AuditLog, Job, OtpMessage, Result
+from app.storage.models import AuditLog, Job, OtpMessage, Result, SavedAccount
 
 log = get_logger(__name__)
 
@@ -236,3 +236,74 @@ class ResultRepository:
             (result.job_id, int(result.success), result.detail, result.created_at.isoformat()),
         )
         self._conn.commit()
+
+
+class SavedAccountRepository:
+    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
+        self._conn = conn or get_connection()
+
+    def save(self, account: SavedAccount) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO saved_accounts
+                (chat_id, site_url, email, password, job_type, plan_name, detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account.chat_id, account.site_url, account.email,
+                account.password, account.job_type, account.plan_name,
+                account.detail, account.created_at.isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def list_by_chat(self, chat_id: int, limit: int = 20) -> List[SavedAccount]:
+        rows = self._conn.execute(
+            "SELECT * FROM saved_accounts WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+        return [
+            SavedAccount(
+                id=r["id"], chat_id=r["chat_id"], site_url=r["site_url"],
+                email=r["email"], password=r["password"], job_type=r["job_type"],
+                plan_name=r["plan_name"], detail=r["detail"],
+                created_at=datetime.fromisoformat(r["created_at"]),
+            )
+            for r in rows
+        ]
+
+    def delete_by_id(self, account_id: int, chat_id: int) -> bool:
+        cur = self._conn.execute(
+            "DELETE FROM saved_accounts WHERE id = ? AND chat_id = ?",
+            (account_id, chat_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+
+class CleanupRepository:
+    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
+        self._conn = conn or get_connection()
+
+    def delete_old_jobs(self, days: int) -> int:
+        cutoff = (utcnow() - __import__("datetime").timedelta(days=days)).isoformat()
+        c1 = self._conn.execute(
+            "DELETE FROM jobs WHERE created_at < ? AND status IN ('completed', 'failed', 'cancelled')",
+            (cutoff,),
+        ).rowcount
+        c2 = self._conn.execute(
+            "DELETE FROM payment_jobs WHERE created_at < ? AND status IN ('completed', 'failed', 'cancelled')",
+            (cutoff,),
+        ).rowcount
+        c3 = self._conn.execute(
+            "DELETE FROM audit_logs WHERE created_at < ?", (cutoff,)
+        ).rowcount
+        c4 = self._conn.execute(
+            "DELETE FROM results WHERE created_at < ?", (cutoff,)
+        ).rowcount
+        self._conn.commit()
+        total = c1 + c2 + c3 + c4
+        if total > 0:
+            log.info("Cleanup: deleted %d old records (jobs=%d, pjobs=%d, audit=%d, results=%d)",
+                     total, c1, c2, c3, c4)
+        return total
