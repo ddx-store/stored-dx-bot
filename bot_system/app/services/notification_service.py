@@ -69,9 +69,9 @@ class JobProgress:
         lines = []
 
         if self.is_payment:
-            title = "║    بوت الدفع التلقائي        ║"
+            title = "║   💳 تفعيل حساب (اشتراك)     ║"
         else:
-            title = "║    بوت التسجيل التلقائي      ║"
+            title = "║   📝  إنشاء حساب جديد        ║"
         lines.append("╔══════════════════════════════╗")
         lines.append(title)
         lines.append("╚══════════════════════════════╝")

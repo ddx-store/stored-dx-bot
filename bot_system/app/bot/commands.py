@@ -30,7 +30,6 @@ PAYMENT_SITES = [
 ]
 
 _pending_site = {}
-
 _pending_payment = {}
 
 
@@ -69,59 +68,82 @@ def _parse_create_args(message_text: str):
     return raw_site, email
 
 
-def _build_main_menu():
+def _build_home_menu():
+    keyboard = [
+        [InlineKeyboardButton("📝  إنشاء حساب", callback_data="menu:register")],
+        [InlineKeyboardButton("💳  تفعيل حساب", callback_data="menu:activate")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _build_register_sites_menu():
     keyboard = []
     row = []
     for i, site in enumerate(PRESET_SITES):
         row.append(InlineKeyboardButton(
             f"{site['icon']} {site['label']}",
-            callback_data=f"site:{site['url']}"
+            callback_data=f"reg:{site['url']}"
         ))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="site:custom")])
-    keyboard.append([InlineKeyboardButton("💳 الدفع التلقائي", callback_data="pay:menu")])
+    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="reg:custom")])
+    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:home")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def _build_payment_menu():
+def _build_payment_sites_menu():
     keyboard = []
     row = []
     for i, site in enumerate(PAYMENT_SITES):
         row.append(InlineKeyboardButton(
             f"{site['icon']} {site['label']}",
-            callback_data=f"paysite:{site['url']}"
+            callback_data=f"pay:{site['url']}"
         ))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="paysite:custom")])
-    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:menu")])
+    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="pay:custom")])
+    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:home")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def _start_text():
+def _home_text():
     return (
         "╔══════════════════════════════╗\n"
-        "║    بوت التسجيل التلقائي      ║\n"
+        "║       STORED DX BOT         ║\n"
+        "╠══════════════════════════════╣\n"
+        "║                              ║\n"
+        "║   📝  إنشاء حساب جديد        ║\n"
+        "║   💳  تفعيل حساب (اشتراك)    ║\n"
+        "║                              ║\n"
         "╚══════════════════════════════╝\n"
         "\n"
         "  اختر الخدمة المطلوبة:\n"
     )
 
 
-def _payment_text():
+def _register_text():
     return (
         "╔══════════════════════════════╗\n"
-        "║    💳 الدفع التلقائي          ║\n"
+        "║   📝  إنشاء حساب جديد        ║\n"
         "╚══════════════════════════════╝\n"
         "\n"
-        "  اختر الموقع للاشتراك:\n"
+        "  اختر الموقع:\n"
+    )
+
+
+def _activate_text():
+    return (
+        "╔══════════════════════════════╗\n"
+        "║   💳  تفعيل حساب (اشتراك)    ║\n"
+        "╚══════════════════════════════╝\n"
+        "\n"
+        "  اختر الموقع:\n"
     )
 
 
@@ -131,7 +153,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_allowed(update.effective_user.id):
             await update.message.reply_text("غير مصرح لك.")
             return
-        await update.message.reply_text(_start_text(), reply_markup=_build_main_menu())
+        _pending_site.pop(update.effective_user.id, None)
+        _pending_payment.pop(update.effective_user.id, None)
+        await update.message.reply_text(_home_text(), reply_markup=_build_home_menu())
     except Exception as exc:
         log.error("cmd_start error: %s\n%s", exc, traceback.format_exc())
 
@@ -143,22 +167,28 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "║         المساعدة             ║\n"
             "╚══════════════════════════════╝\n"
             "\n"
-            "  📝 التسجيل:\n"
+            "  📝 إنشاء حساب:\n"
+            "  ───────────────\n"
             "  1. اضغط /start\n"
-            "  2. اختر الموقع من الازرار\n"
-            "  3. ارسل الايميل\n"
-            "  4. انتظر النتيجة\n"
+            "  2. اختر  إنشاء حساب\n"
+            "  3. اختر الموقع\n"
+            "  4. ارسل الايميل\n"
+            "  5. انتظر النتيجة\n"
             "\n"
-            "  💳 الدفع:\n"
-            "  1. اضغط /pay او من القائمة\n"
-            "  2. اختر الموقع\n"
-            "  3. ارسل الايميل\n"
-            "  4. ارسل الباسوورد\n"
-            "  5. ارسل بيانات البطاقة\n"
+            "  💳 تفعيل حساب:\n"
+            "  ───────────────\n"
+            "  1. اضغط /start\n"
+            "  2. اختر  تفعيل حساب\n"
+            "  3. اختر الموقع\n"
+            "  4. ارسل الايميل\n"
+            "  5. ارسل الباسوورد\n"
+            "  6. ارسل بيانات البطاقة\n"
             "\n"
             "  الاوامر:\n"
-            "  /create site.com email@x.com\n"
-            "  /pay - الدفع التلقائي\n"
+            "  ───────────────\n"
+            "  /start - القائمة الرئيسية\n"
+            "  /create site.com email\n"
+            "  /pay - تفعيل حساب\n"
         )
         await update.message.reply_text(text)
     except Exception as exc:
@@ -171,7 +201,9 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_allowed(update.effective_user.id):
             await update.message.reply_text("غير مصرح لك.")
             return
-        await update.message.reply_text(_payment_text(), reply_markup=_build_payment_menu())
+        _pending_site.pop(update.effective_user.id, None)
+        _pending_payment.pop(update.effective_user.id, None)
+        await update.message.reply_text(_activate_text(), reply_markup=_build_payment_sites_menu())
     except Exception as exc:
         log.error("cmd_pay error: %s\n%s", exc, traceback.format_exc())
 
@@ -188,18 +220,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     data = query.data or ""
     log.info("callback_handler: user=%s data=%s", user_id, data)
 
-    if data == "pay:menu":
+    if data == "back:home":
         _pending_site.pop(user_id, None)
         _pending_payment.pop(user_id, None)
-        await query.edit_message_text(_payment_text(), reply_markup=_build_payment_menu())
+        await query.edit_message_text(_home_text(), reply_markup=_build_home_menu())
         return
 
-    if data == "site:custom":
+    if data == "menu:register":
+        _pending_payment.pop(user_id, None)
+        await query.edit_message_text(_register_text(), reply_markup=_build_register_sites_menu())
+        return
+
+    if data == "menu:activate":
+        _pending_site.pop(user_id, None)
+        await query.edit_message_text(_activate_text(), reply_markup=_build_payment_sites_menu())
+        return
+
+    if data == "back:regsites":
+        _pending_site.pop(user_id, None)
+        await query.edit_message_text(_register_text(), reply_markup=_build_register_sites_menu())
+        return
+
+    if data == "back:paysites":
+        _pending_payment.pop(user_id, None)
+        await query.edit_message_text(_activate_text(), reply_markup=_build_payment_sites_menu())
+        return
+
+    if data == "reg:custom":
         _pending_site[user_id] = "__custom__"
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:menu")]]
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:regsites")]]
         await query.edit_message_text(
             "╔══════════════════════════════╗\n"
-            "║       موقع مخصص             ║\n"
+            "║   📝  موقع مخصص              ║\n"
             "╚══════════════════════════════╝\n"
             "\n"
             "  ارسل الموقع والايميل:\n"
@@ -210,54 +262,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    if data == "back:menu":
-        _pending_site.pop(user_id, None)
-        _pending_payment.pop(user_id, None)
-        await query.edit_message_text(_start_text(), reply_markup=_build_main_menu())
-        return
-
-    if data == "back:pay":
-        _pending_payment.pop(user_id, None)
-        await query.edit_message_text(_payment_text(), reply_markup=_build_payment_menu())
-        return
-
-    if data.startswith("paysite:"):
-        site_val = data[8:]
-
-        if site_val == "custom":
-            _pending_payment[user_id] = {"step": "custom_site"}
-            keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:pay")]]
-            await query.edit_message_text(
-                "╔══════════════════════════════╗\n"
-                "║    💳 موقع مخصص للدفع        ║\n"
-                "╚══════════════════════════════╝\n"
-                "\n"
-                "  ارسل رابط الموقع:\n"
-                "  مثال: site.com\n",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-            return
-
-        site_label = site_val
-        for ps in PAYMENT_SITES:
-            if ps["url"] == site_val:
-                site_label = f"{ps['icon']} {ps['label']}"
-                break
-
-        _pending_payment[user_id] = {"step": "email", "site_url": site_val, "label": site_label}
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:pay")]]
-        await query.edit_message_text(
-            "╔══════════════════════════════╗\n"
-            f"║  💳 {site_label}\n"
-            "╚══════════════════════════════╝\n"
-            "\n"
-            "  📧 ارسل الايميل (حساب الموقع):\n",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    if data.startswith("site:"):
-        site_url = data[5:]
+    if data.startswith("reg:"):
+        site_url = data[4:]
         site_label = site_url
         for ps in PRESET_SITES:
             if ps["url"] == site_url:
@@ -265,13 +271,47 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 break
 
         _pending_site[user_id] = site_url
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:menu")]]
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:regsites")]]
         await query.edit_message_text(
             "╔══════════════════════════════╗\n"
-            f"║  {site_label}\n"
+            f"║  📝  {site_label}\n"
             "╚══════════════════════════════╝\n"
             "\n"
             "  📧 ارسل الايميل:\n",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data == "pay:custom":
+        _pending_payment[user_id] = {"step": "custom_site"}
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            "║   💳  موقع مخصص              ║\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  ارسل رابط الموقع:\n"
+            "  مثال: site.com\n",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("pay:"):
+        site_val = data[4:]
+        site_label = site_val
+        for ps in PAYMENT_SITES:
+            if ps["url"] == site_val:
+                site_label = f"{ps['icon']} {ps['label']}"
+                break
+
+        _pending_payment[user_id] = {"step": "email", "site_url": site_val, "label": site_label}
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            f"║  💳  {site_label}\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  📧 ارسل الايميل (حساب الموقع):\n",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -343,7 +383,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         payment["step"] = "email"
         await update.message.reply_text(
             "╔══════════════════════════════╗\n"
-            f"║  💳 {raw}\n"
+            f"║  💳  {raw}\n"
             "╚══════════════════════════════╝\n"
             "\n"
             "  📧 ارسل الايميل (حساب الموقع):\n"
@@ -358,7 +398,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         payment["email"] = email
         payment["step"] = "password"
         await update.message.reply_text(
-            f"  📧  {email}\n"
+            f"  ✅  {email}\n"
             "\n"
             "  🔑 ارسل الباسوورد:\n"
         )
@@ -372,8 +412,10 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         payment["password"] = password
         payment["step"] = "card"
         await update.message.reply_text(
-            "  💳 ارسل بيانات البطاقة بالتنسيق التالي:\n"
+            "  ✅  تم حفظ الباسوورد\n"
             "\n"
+            "  💳 ارسل بيانات البطاقة:\n"
+            "  ─────────────────────\n"
             "  رقم البطاقة\n"
             "  MM/YY\n"
             "  CVV\n"
@@ -402,6 +444,15 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             return
 
         _pending_payment.pop(user_id, None)
+
+        masked = f"****{card_data.number[-4:]}"
+        await update.message.reply_text(
+            "  ✅  بيانات البطاقة مقبولة\n"
+            f"  💳  {masked}\n"
+            "\n"
+            "  جاري بدء عملية التفعيل...\n"
+        )
+
         await _start_payment_job(
             update,
             site_url=payment["site_url"],

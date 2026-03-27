@@ -57,11 +57,13 @@ bot_system/
 
 ## UI Design
 
-- **Inline keyboard** with preset sites + "custom site" + "💳 الدفع التلقائي" button
+- **Home screen**: 2 main buttons (📝 إنشاء حساب, 💳 تفعيل حساب)
+- Each button leads to site selection, then step-by-step data collection
 - **Single editable message** for progress — 6-step checklist updated via `edit_message`
 - Registration steps: فتح الموقع → البحث عن التسجيل → تعبئة البيانات → إرسال النموذج → التحقق من البريد → إكمال الملف
 - Payment steps: فتح الموقع → تسجيل الدخول → صفحة الاشتراك → تعبئة البطاقة → تأكيد الدفع → التحقق من النتيجة
 - Icons: ▫️ pending, ◐◓◑◒ in-progress (animated), ✅ done, ❌ failed
+- Navigation: back buttons on every screen, clean callback_data prefixes (reg:, pay:, menu:, back:)
 
 ## Commands
 
