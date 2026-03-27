@@ -154,6 +154,11 @@ _REGISTER_PATHS = [
     "/join", "/auth/signup", "/account/register", "/create-account",
 ]
 
+_DIRECT_AUTH_URLS = {
+    "chatgpt.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&prompt=login",
+    "chat.openai.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&prompt=login",
+}
+
 _OTP_KEYWORDS = [
     "verification code", "verify your email", "check your email",
     "enter the code", "confirm your email", "we sent you",
@@ -1321,6 +1326,15 @@ class PlaywrightClient:
         parsed = urlparse(site_url)
         has_path = parsed.path not in ("", "/")
         base_url = f"{parsed.scheme}://{parsed.netloc}"
+        host = parsed.netloc.lower().lstrip("www.")
+
+        direct_auth = _DIRECT_AUTH_URLS.get(host)
+        if direct_auth:
+            log.info("-> Using direct auth URL for %s", host)
+            self._report(f"فتح صفحة التسجيل مباشرة...")
+            if await self._try_url_smart(page, direct_auth):
+                return True
+            log.warning("Direct auth URL failed for %s, falling back", host)
 
         _LOGIN_PATHS = ["/auth/login", "/login", "/signin", "/sign-in", "/auth/signin"]
         is_login_url = has_path and any(parsed.path.rstrip("/").lower().endswith(lp.rstrip("/")) for lp in _LOGIN_PATHS)
@@ -1329,53 +1343,74 @@ class PlaywrightClient:
             if await self._try_url_smart(page, site_url):
                 return True
 
-        for attempt in range(2):
-            if attempt > 0:
-                self._report("إعادة المحاولة...")
-                await asyncio.sleep(3)
+        homepage_loaded = await self._load_homepage(page, base_url)
 
-            homepage_loaded = await self._load_homepage(page, base_url)
+        if homepage_loaded:
+            if await self._has_fillable_form(page, require_register_context=True):
+                return True
 
-            if homepage_loaded:
-                if await self._has_fillable_form(page, require_register_context=True):
-                    return True
-
-                signup_btn_texts = [
-                    "sign up for free", "sign up", "signup", "register",
-                    "create account", "get started", "إنشاء حساب",
-                    "سجل الآن", "سجل", "تسجيل",
-                ]
-                for text in signup_btn_texts:
-                    try:
-                        btn = page.get_by_text(text, exact=False).first
-                        if await btn.is_visible(timeout=400):
-                            await btn.click()
-                            await asyncio.sleep(2)
-                            await self._wait_for_spa(page)
-                            await self._wait_for_cf(page, max_wait=10)
-                            if await self._has_fillable_form(page):
-                                return True
-                            if await self._has_email_only_form(page):
-                                return True
-                            break
-                    except Exception:
-                        continue
-
-                register_link = await self._find_register_link(page)
-                if register_link:
-                    try:
-                        await register_link.click()
-                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+            signup_btn_texts = [
+                "sign up for free", "sign up", "signup", "register",
+                "create account", "get started", "إنشاء حساب",
+                "سجل الآن", "سجل", "تسجيل",
+            ]
+            btn_clicked = False
+            for text in signup_btn_texts:
+                try:
+                    btn = page.get_by_text(text, exact=False).first
+                    if await btn.is_visible(timeout=400):
+                        before_url = page.url
+                        await btn.click()
+                        await asyncio.sleep(3)
                         await self._wait_for_spa(page)
-                        if await self._click_register_tab(page):
-                            await asyncio.sleep(1)
-                            if await self._has_fillable_form(page):
-                                return True
-                        elif await self._has_fillable_form(page, require_register_context=True):
+                        if page.url.rstrip("/") != before_url.rstrip("/"):
+                            await self._wait_for_cf(page, max_wait=15)
+                        if await self._has_fillable_form(page):
                             return True
-                    except Exception:
-                        pass
-                break
+                        if await self._has_email_only_form(page):
+                            return True
+                        btn_clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if btn_clicked and not await self._has_fillable_form(page):
+                log.info("-> Button click didn't navigate, trying JS click fallback...")
+                try:
+                    before_url = page.url
+                    for sel in ['[data-testid*="signup"]', '[data-testid*="sign-up"]',
+                                '[data-testid*="register"]']:
+                        js_result = await page.evaluate(f"""() => {{
+                            const btn = document.querySelector('{sel}');
+                            if (!btn) return null;
+                            btn.click();
+                            return btn.tagName;
+                        }}""")
+                        if js_result:
+                            await asyncio.sleep(4)
+                            if page.url.rstrip("/") != before_url.rstrip("/"):
+                                await self._wait_for_cf(page, max_wait=15)
+                                if await self._has_fillable_form(page):
+                                    return True
+                                if await self._has_email_only_form(page):
+                                    return True
+                except Exception:
+                    pass
+
+            register_link = await self._find_register_link(page)
+            if register_link:
+                try:
+                    await register_link.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    await self._wait_for_spa(page)
+                    if await self._click_register_tab(page):
+                        await asyncio.sleep(1)
+                        if await self._has_fillable_form(page):
+                            return True
+                    elif await self._has_fillable_form(page, require_register_context=True):
+                        return True
+                except Exception:
+                    pass
 
         if is_login_url:
             if await self._try_url_smart(page, site_url):
