@@ -417,6 +417,10 @@ class PlaywrightClient:
                 pass
             await asyncio.sleep(1)
 
+            if page.url.rstrip("/") != before_url.rstrip("/"):
+                await self._wait_for_cf(page, max_wait=15)
+                await self._wait_for_spa(page)
+
             step_result = await self._analyze(page, before_url, api_responses)
             last_result = step_result
             if not step_result.success:
@@ -1971,19 +1975,28 @@ class PlaywrightClient:
             path = current_url.lower()
 
             still_has_inputs = False
-            try:
-                inputs = await page.query_selector_all("input")
-                for inp in inputs:
+            for attempt in range(3):
+                try:
+                    inputs = await page.query_selector_all("input")
+                    for inp in inputs:
+                        try:
+                            if await inp.is_visible():
+                                t = (await inp.get_attribute("type") or "text").lower()
+                                if t not in ("hidden", "submit", "button", "file", "image", "reset"):
+                                    still_has_inputs = True
+                                    break
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                if still_has_inputs:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(2)
                     try:
-                        if await inp.is_visible():
-                            t = (await inp.get_attribute("type") or "text").lower()
-                            if t not in ("hidden", "submit", "button", "file", "image", "reset"):
-                                still_has_inputs = True
-                                break
+                        await page.wait_for_load_state("domcontentloaded", timeout=3000)
                     except Exception:
                         pass
-            except Exception:
-                pass
 
             if still_has_inputs:
                 return RegistrationResult(
@@ -1993,7 +2006,7 @@ class PlaywrightClient:
                 )
 
             if any(k in path for k in [
-                "account", "dashboard", "profile", "home",
+                "account", "dashboard", "home",
                 "welcome",
             ]):
                 return RegistrationResult(
