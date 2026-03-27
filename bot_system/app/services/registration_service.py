@@ -24,7 +24,7 @@ from app.storage.repositories import ResultRepository
 
 log = get_logger(__name__)
 
-JOB_TIMEOUT = 200
+JOB_TIMEOUT = 350
 
 
 class RegistrationService:

@@ -28,7 +28,7 @@ from app.core.utils import fake_first_name, fake_last_name, fake_username
 
 log = get_logger(__name__)
 
-GLOBAL_TIMEOUT = 180
+GLOBAL_TIMEOUT = 300
 
 _NAV_TIMEOUT = 15_000
 _SPA_WAIT = 2.0
@@ -181,6 +181,8 @@ _SUCCESS_KEYWORDS = [
     "تم التسجيل", "حسابي", "thank you for registering",
     "registration successful", "you're all set",
     "account has been created", "successfully created",
+    "you're set", "you are set", "account is ready",
+    "setup complete", "profile complete",
 ]
 
 _OAUTH_INDICATORS = [
@@ -550,19 +552,25 @@ class PlaywrightClient:
             log.info("-> Profile step %d: URL=%s", step, page.url[:120])
             await self._dump_page_elements(page)
 
+            body = ""
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                pass
+
+            if any(kw in body for kw in _SUCCESS_KEYWORDS):
+                ok_clicked = await self._click_confirm_dialog(page)
+                if ok_clicked:
+                    self._report("تم تأكيد إنشاء الحساب")
+                    await asyncio.sleep(2)
+                return RegistrationResult(
+                    True,
+                    message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
+                    page_url=page.url,
+                )
+
             new_inputs = await self._wait_for_inputs(page, max_wait=6)
             if new_inputs == 0:
-                body = ""
-                try:
-                    body = (await page.inner_text("body")).lower()
-                except Exception:
-                    pass
-                if any(kw in body for kw in _SUCCESS_KEYWORDS):
-                    return RegistrationResult(
-                        True,
-                        message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
-                        page_url=page.url,
-                    )
                 skip_btn = await self._find_skip_button(page)
                 if skip_btn:
                     try:
@@ -594,6 +602,23 @@ class PlaywrightClient:
                 filled_count += body_fill
 
             if filled_count == 0:
+                ok_clicked = await self._click_confirm_dialog(page)
+                if ok_clicked:
+                    self._report("تم تأكيد إنشاء الحساب")
+                    await asyncio.sleep(2)
+                    body2 = ""
+                    try:
+                        body2 = (await page.inner_text("body")).lower()
+                    except Exception:
+                        pass
+                    if any(kw in body2 for kw in _SUCCESS_KEYWORDS):
+                        return RegistrationResult(
+                            True,
+                            message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
+                            page_url=page.url,
+                        )
+                    continue
+
                 continue_btn = await self._find_continue_button(page)
                 if continue_btn:
                     self._report(f"إكمال الملف الشخصي -- الخطوة {step} (متابعة)...")
@@ -923,15 +948,27 @@ class PlaywrightClient:
                 for i, sb in enumerate(visible_spins[:3]):
                     try:
                         await sb.click()
+                        await asyncio.sleep(0.15)
+                        await sb.press("Control+a")
+                        await asyncio.sleep(0.05)
+                        await sb.type(vals[i], delay=80)
                         await asyncio.sleep(0.1)
-                        await sb.evaluate(f'(el) => {{ el.textContent = "{vals[i]}"; }}')
-                        await sb.dispatch_event("input")
-                        await sb.dispatch_event("change")
+                        await sb.press("Tab")
                         filled += 1
                     except Exception:
                         try:
-                            await sb.press("Control+a")
-                            await sb.type(vals[i], delay=50)
+                            await sb.evaluate(f"""(el) => {{
+                                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                                    window.HTMLInputElement.prototype, 'value'
+                                );
+                                if (nativeInputValueSetter && nativeInputValueSetter.set) {{
+                                    nativeInputValueSetter.set.call(el, '{vals[i]}');
+                                }} else {{
+                                    el.textContent = '{vals[i]}';
+                                }}
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            }}""")
                             filled += 1
                         except Exception:
                             pass
@@ -1105,6 +1142,28 @@ class PlaywrightClient:
                 continue
 
         return None
+
+    async def _click_confirm_dialog(self, page) -> bool:
+        confirm_texts = [
+            "ok", "okay", "got it", "continue", "done", "agree",
+            "accept", "confirm", "let's go", "start", "finish",
+            "تم", "موافق", "حسناً", "متابعة",
+        ]
+        for text in confirm_texts:
+            try:
+                btn = page.locator(
+                    f'button:has-text("{text}"), [role="button"]:has-text("{text}")'
+                ).first
+                if await btn.is_visible(timeout=300):
+                    btn_text = (await btn.inner_text()).strip()
+                    if len(btn_text) < 30:
+                        log.info("-> Clicking confirm dialog: '%s'", btn_text)
+                        await btn.click()
+                        await asyncio.sleep(1)
+                        return True
+            except Exception:
+                continue
+        return False
 
     async def _find_skip_button(self, page):
         skip_texts = [
@@ -1523,11 +1582,18 @@ class PlaywrightClient:
                 return False
 
             await self._wait_for_spa(page)
+            await asyncio.sleep(2)
             if await self._has_fillable_form(page):
+                return True
+            if await self._has_email_only_form(page):
+                log.info("-> Found email-only form at %s", page.url[:80])
                 return True
             if await self._click_register_tab(page):
                 await asyncio.sleep(1)
-                return await self._has_fillable_form(page)
+                if await self._has_fillable_form(page):
+                    return True
+                if await self._has_email_only_form(page):
+                    return True
         except Exception as exc:
             log.debug("_try_url %s failed: %s", url, exc)
         return False
@@ -1799,7 +1865,7 @@ class PlaywrightClient:
                 hint = f"{inp_type} {name} {placeholder} {inp_id} {autocomplete} {aria_label}"
 
                 current_val = await inp.input_value()
-                if current_val and len(current_val) > 2:
+                if current_val and len(current_val) >= 2:
                     continue
 
                 if inp_type == "checkbox" or inp_type == "radio":
