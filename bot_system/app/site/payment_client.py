@@ -37,7 +37,7 @@ _STEALTH_JS = """
 """
 
 _UPGRADE_URLS = {
-    "chatgpt.com": "https://chatgpt.com/#pricing",
+    "chatgpt.com": "https://chatgpt.com/pricing",
     "canva.com": "https://www.canva.com/pricing/",
     "protonvpn.com": "https://protonvpn.com/pricing",
     "pixlr.com": "https://pixlr.com/pricing/",
@@ -58,19 +58,29 @@ _LOGIN_BUTTON_TEXTS = [
 ]
 
 _UPGRADE_BUTTON_TEXTS = [
-    "upgrade", "subscribe", "get plus", "get pro", "get premium",
+    "upgrade to plus", "upgrade plan", "upgrade to",
+    "get plus", "get pro", "get premium",
+    "subscribe", "upgrade",
     "buy", "purchase", "go pro", "try pro", "start trial",
-    "upgrade plan", "upgrade to", "الترقية", "اشتراك",
+    "الترقية", "اشتراك",
     "get started", "choose plan", "select plan",
     "get canva pro", "start free trial",
 ]
 
 _PLAN_BUTTON_TEXTS = {
-    "plus": ["plus", "get plus", "upgrade to plus"],
+    "plus": ["upgrade to plus", "get plus", "plus", "chatgpt plus", "upgrade plan"],
     "pro": ["pro", "get pro", "go pro", "try pro", "get canva pro"],
     "premium": ["premium", "get premium"],
     "basic": ["basic", "starter"],
 }
+
+_CHATGPT_CONFIRM_SELECTORS = [
+    'button[data-testid="payment-confirm-button"]',
+    'button:has-text("Subscribe")',
+    'button:has-text("Upgrade")',
+    'button[class*="subscribe"]',
+    'button[class*="payment"]',
+]
 
 
 @dataclass
@@ -371,15 +381,23 @@ class PaymentClient:
             except Exception:
                 pass
 
-        await asyncio.sleep(2)
+        # Auth0 (ChatGPT/OpenAI) shows password on a NEW page after email submit
+        # Wait longer for the redirect to auth.openai.com
+        await asyncio.sleep(3)
         await self._wait_spa(page)
 
         if not password_input:
-            password_input = await self._find_input(page, ["password", "passwd"])
+            # Try multiple times — Auth0 may take a moment to render password field
+            for _ in range(3):
+                password_input = await self._find_input(page, ["password", "passwd"])
+                if password_input:
+                    break
+                await asyncio.sleep(1.5)
+
             if password_input:
                 await self._fill_input(password_input, password)
                 await self._click_submit(page, ["log in", "sign in", "login", "continue", "next", "التالي", "دخول"])
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 await self._wait_spa(page)
 
         body = ""
@@ -409,13 +427,31 @@ class PaymentClient:
             except Exception:
                 log.warning("Direct upgrade URL failed, trying buttons")
 
+        # Click the plan button first (e.g. "Plus") BEFORE the generic "Upgrade" button
+        # so we land on the right plan's checkout rather than a generic page
+        clicked_plan = False
+        if plan_name:
+            plan_texts = _PLAN_BUTTON_TEXTS.get(plan_name.lower(), [plan_name])
+            for text in plan_texts:
+                try:
+                    btn = page.get_by_text(text, exact=False).first
+                    if await btn.is_visible(timeout=700):
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        await self._wait_spa(page)
+                        log.info("Selected plan: %s", text)
+                        clicked_plan = True
+                        break
+                except Exception:
+                    continue
+
         clicked_upgrade = False
         for text in _UPGRADE_BUTTON_TEXTS:
             try:
                 btn = page.get_by_text(text, exact=False).first
                 if await btn.is_visible(timeout=500):
                     await btn.click()
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2)
                     await self._wait_spa(page)
                     log.info("Clicked upgrade button: %s", text)
                     clicked_upgrade = True
@@ -423,19 +459,24 @@ class PaymentClient:
             except Exception:
                 continue
 
-        if plan_name:
+        # If plan not clicked yet, try again after the upgrade click opened a modal
+        if not clicked_plan and plan_name:
             plan_texts = _PLAN_BUTTON_TEXTS.get(plan_name.lower(), [plan_name])
             for text in plan_texts:
                 try:
                     btn = page.get_by_text(text, exact=False).first
-                    if await btn.is_visible(timeout=500):
+                    if await btn.is_visible(timeout=700):
                         await btn.click()
-                        await asyncio.sleep(1.5)
+                        await asyncio.sleep(2)
                         await self._wait_spa(page)
-                        log.info("Selected plan: %s", text)
+                        log.info("Selected plan (post-modal): %s", text)
                         break
                 except Exception:
                     continue
+
+        # For ChatGPT: after plan click, a checkout modal/dialog appears — wait for it
+        if domain == "chatgpt.com":
+            await self._wait_chatgpt_checkout(page)
 
         body_check = ""
         try:
@@ -460,6 +501,28 @@ class PaymentClient:
             return False
 
         return True
+
+    async def _wait_chatgpt_checkout(self, page, timeout_ms: int = 10_000) -> None:
+        """Wait for ChatGPT's checkout modal/page to fully render."""
+        deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+        while asyncio.get_event_loop().time() < deadline:
+            # Stripe iframe appeared = checkout form is ready
+            for frame in page.frames:
+                if "stripe" in (frame.url or "").lower():
+                    log.info("ChatGPT checkout modal detected (Stripe iframe found)")
+                    await asyncio.sleep(0.5)
+                    return
+            # Also accept any subscribe button appearing
+            try:
+                btn = page.locator('button:has-text("Subscribe"), button:has-text("Upgrade")').first
+                if await btn.is_visible(timeout=200):
+                    log.info("ChatGPT checkout modal detected (Subscribe button visible)")
+                    await asyncio.sleep(0.5)
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        log.warning("ChatGPT checkout modal wait timed out")
 
     async def _find_payment_form(self, page) -> bool:
         for _ in range(5):
@@ -497,15 +560,138 @@ class PaymentClient:
     ) -> bool:
         expiry = f"{expiry_month}/{expiry_year}"
 
+        # Wait for any Stripe iframe to load first
+        await self._wait_for_stripe(page)
+
+        # 1. Try combined Stripe Payment Element (all fields in one iframe — ChatGPT style)
+        if await self._fill_stripe_combined(page, card_number, expiry, cvv, holder_name, billing_zip, billing_country):
+            log.info("Filled card via Stripe Combined (Payment Element)")
+            return True
+
+        # 2. Try separate Stripe iframes (one per field — older Stripe Elements)
         if await self._fill_stripe_elements_separate(page, card_number, expiry, cvv, holder_name, billing_zip, billing_country):
             log.info("Filled card via Stripe Elements (separate iframes)")
             return True
 
+        # 3. Try single Stripe iframe with all fields inside
         stripe_frame = await self._find_stripe_iframe(page)
         if stripe_frame:
             return await self._fill_stripe(stripe_frame, page, card_number, expiry, cvv, holder_name, billing_zip, billing_country)
 
+        # 4. Direct card inputs on page (no iframe)
         return await self._fill_direct_card(page, card_number, expiry_month, expiry_year, cvv, holder_name, billing_zip, billing_country)
+
+    async def _wait_for_stripe(self, page, timeout_ms: int = 8000) -> None:
+        """Wait until at least one Stripe iframe appears."""
+        deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
+        while asyncio.get_event_loop().time() < deadline:
+            for frame in page.frames:
+                if "stripe" in (frame.url or "").lower():
+                    return
+            await asyncio.sleep(0.4)
+
+    async def _fill_stripe_combined(
+        self, page, card_number, expiry, cvv, holder_name,
+        billing_zip="", billing_country="US",
+    ) -> bool:
+        """
+        Newer Stripe Payment Element: all fields in a SINGLE combined iframe.
+        Handles: p-CardNumber, p-CardExpiry, p-CardCvc style selectors and
+        placeholder-based selectors.
+        """
+        zip_to_use = billing_zip or "10001"
+
+        _CARD_SELS = [
+            '[name="number"]', '[placeholder*="1234"]',
+            '[data-elements-stable-field-name="cardNumber"]',
+            '[autocomplete="cc-number"]', '[name="cardnumber"]',
+            'input[id*="card"][id*="number" i]',
+        ]
+        _EXP_SELS = [
+            '[name="expiry"]', '[placeholder*="MM"]', '[placeholder*="Expiry"]',
+            '[data-elements-stable-field-name="cardExpiry"]',
+            '[autocomplete="cc-exp"]', '[name="exp-date"]',
+        ]
+        _CVV_SELS = [
+            '[name="cvc"]', '[name="cvv"]',
+            '[data-elements-stable-field-name="cardCvc"]',
+            '[autocomplete="cc-csc"]',
+            '[placeholder*="CVC"]', '[placeholder*="CVV"]', '[placeholder*="Security"]',
+        ]
+
+        for frame in page.frames:
+            url = frame.url or ""
+            if "stripe" not in url.lower():
+                continue
+
+            card_filled = False
+            for sel in _CARD_SELS:
+                try:
+                    inp = frame.locator(sel).first
+                    if await inp.is_visible(timeout=800):
+                        await inp.click()
+                        await asyncio.sleep(0.1)
+                        await inp.type(card_number, delay=30)
+                        card_filled = True
+                        break
+                except Exception:
+                    pass
+
+            if not card_filled:
+                continue
+
+            # Expiry
+            for sel in _EXP_SELS:
+                try:
+                    inp = frame.locator(sel).first
+                    if await inp.is_visible(timeout=600):
+                        await inp.click()
+                        await asyncio.sleep(0.1)
+                        await inp.type(expiry, delay=30)
+                        break
+                except Exception:
+                    pass
+
+            # CVV
+            for sel in _CVV_SELS:
+                try:
+                    inp = frame.locator(sel).first
+                    if await inp.is_visible(timeout=600):
+                        await inp.click()
+                        await asyncio.sleep(0.1)
+                        await inp.type(cvv, delay=30)
+                        break
+                except Exception:
+                    pass
+
+            # Postal inside the same Stripe frame
+            try:
+                zip_inp = frame.locator('[name="postal"], [autocomplete="postal-code"], [placeholder*="ZIP"]').first
+                if await zip_inp.is_visible(timeout=500):
+                    await zip_inp.fill(zip_to_use)
+            except Exception:
+                pass
+
+            # Name and zip on the main page
+            name_input = await self._find_input(page, ["cardholder", "card-holder", "name", "billing"])
+            if name_input:
+                await self._fill_input(name_input, holder_name)
+
+            zip_on_page = await self._find_input(page, ["postal", "zip", "zipcode"])
+            if zip_on_page:
+                await self._fill_input(zip_on_page, zip_to_use)
+
+            country_select = page.locator('select[name*="country"], select[id*="country"]').first
+            try:
+                if await country_select.is_visible(timeout=600):
+                    await country_select.select_option(value=billing_country)
+            except Exception:
+                pass
+
+            log.info("_fill_stripe_combined succeeded with frame %s", url[:80])
+            return True
+
+        return False
 
     async def _find_stripe_iframe(self, page):
         try:
@@ -626,11 +812,27 @@ class PaymentClient:
         return True
 
     async def _confirm_payment(self, page) -> bool:
+        # Try ChatGPT-specific selectors first (data-testid, class-based)
+        for sel in _CHATGPT_CONFIRM_SELECTORS:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=600):
+                    btn_text = (await btn.inner_text()).strip().lower()
+                    skip = ["cancel", "back", "إلغاء", "رجوع"]
+                    if any(s in btn_text for s in skip):
+                        continue
+                    await btn.click()
+                    log.info("Clicked ChatGPT confirm button: %s", sel)
+                    return True
+            except Exception:
+                continue
+
         confirm_texts = [
-            "subscribe", "pay", "confirm", "complete purchase",
+            "subscribe", "start subscription",
+            "pay", "pay now", "buy now",
+            "confirm payment", "confirm", "complete purchase",
             "place order", "submit payment", "upgrade",
-            "start subscription", "ادفع", "تأكيد", "اشترك",
-            "confirm payment", "pay now", "buy now",
+            "ادفع", "تأكيد", "اشترك",
         ]
 
         for text in confirm_texts:
@@ -699,6 +901,7 @@ class PaymentClient:
             "thank you", "payment successful", "payment complete", "order confirmed",
             "subscribed", "activated", "you're all set", "enjoy your",
             "receipt", "transaction id", "confirmation number", "invoice",
+            "welcome to chatgpt plus", "plus subscription", "subscription active",
             "شكرا لك", "نجح", "تم الاشتراك", "مفعل", "تم الدفع",
         ]
         for kw in success_kw:
