@@ -18,12 +18,22 @@ _PROGRESS_STEPS = [
     "إكمال الملف",
 ]
 
+_PAYMENT_STEPS = [
+    "فتح الموقع",
+    "تسجيل الدخول",
+    "صفحة الاشتراك",
+    "تعبئة البطاقة",
+    "تأكيد الدفع",
+    "التحقق من النتيجة",
+]
+
 _ANIM_FRAMES = ["◐", "◓", "◑", "◒"]
 
 
 class JobProgress:
-    def __init__(self, job: Job):
+    def __init__(self, job, is_payment: bool = False):
         self.job = job
+        self.is_payment = is_payment
         self.message_id: Optional[int] = None
         self.current_step = -1
         self.status_line = ""
@@ -38,8 +48,12 @@ class JobProgress:
         m, s = divmod(secs, 60)
         return f"{m:02d}:{s:02d}"
 
+    @property
+    def _steps(self) -> List[str]:
+        return _PAYMENT_STEPS if self.is_payment else _PROGRESS_STEPS
+
     def _progress_bar(self) -> str:
-        total = len(_PROGRESS_STEPS)
+        total = len(self._steps)
         if self.is_done:
             done = total
         elif self.current_step < 0:
@@ -54,8 +68,12 @@ class JobProgress:
     def _build_text(self) -> str:
         lines = []
 
+        if self.is_payment:
+            title = "║    بوت الدفع التلقائي        ║"
+        else:
+            title = "║    بوت التسجيل التلقائي      ║"
         lines.append("╔══════════════════════════════╗")
-        lines.append("║    بوت التسجيل التلقائي      ║")
+        lines.append(title)
         lines.append("╚══════════════════════════════╝")
         lines.append("")
 
@@ -66,7 +84,8 @@ class JobProgress:
         lines.append(self._progress_bar())
         lines.append("")
 
-        for i, label in enumerate(_PROGRESS_STEPS):
+        steps = self._steps
+        for i, label in enumerate(steps):
             if self.is_done:
                 icon = "✅"
             elif self.is_failed and i > self.current_step:
@@ -82,9 +101,8 @@ class JobProgress:
             else:
                 icon = "▫️"
 
-            connector = "┃" if i < len(_PROGRESS_STEPS) - 1 else " "
             lines.append(f"  {icon}  {label}")
-            if i < len(_PROGRESS_STEPS) - 1:
+            if i < len(steps) - 1:
                 if self.is_done or i < self.current_step:
                     lines.append(f"  ┃")
                 else:
@@ -131,10 +149,10 @@ _lock = threading.Lock()
 _active: Dict[str, JobProgress] = {}
 
 
-def _get_progress(job: Job) -> JobProgress:
+def _get_progress(job, is_payment: bool = False) -> JobProgress:
     with _lock:
         if job.job_id not in _active:
-            _active[job.job_id] = JobProgress(job)
+            _active[job.job_id] = JobProgress(job, is_payment=is_payment)
         return _active[job.job_id]
 
 
@@ -152,23 +170,33 @@ _STEP_KEYWORDS = {
     5: ["profile", "ملف", "شخصي", "about", "إكمال", "اكمال", "name", "اسم", "birthday", "complete"],
 }
 
+_PAYMENT_STEP_KEYWORDS = {
+    0: ["فتح", "open", "navigat", "loading"],
+    1: ["دخول", "login", "sign in", "تسجيل الدخول"],
+    2: ["اشتراك", "upgrade", "subscribe", "pricing", "plan", "صفحة الاشتراك"],
+    3: ["بطاقة", "card", "تعبئة", "fill", "stripe", "payment form", "بيانات البطاقة"],
+    4: ["تأكيد", "confirm", "pay", "submit", "دفع"],
+    5: ["نتيجة", "result", "success", "تحقق", "check", "التحقق من النتيجة"],
+}
 
-def _detect_step(msg: str) -> int:
+
+def _detect_step(msg: str, is_payment: bool = False) -> int:
     msg_lower = msg.lower()
-    for step_idx in sorted(_STEP_KEYWORDS.keys(), reverse=True):
-        for kw in _STEP_KEYWORDS[step_idx]:
+    keywords = _PAYMENT_STEP_KEYWORDS if is_payment else _STEP_KEYWORDS
+    for step_idx in sorted(keywords.keys(), reverse=True):
+        for kw in keywords[step_idx]:
             if kw in msg_lower:
                 return step_idx
     return -1
 
 
 class NotificationService:
-    def step(self, job: Job, icon: str, message: str) -> None:
+    def step(self, job, icon: str, message: str, is_payment: bool = False) -> None:
         if not job.chat_id:
             return
         try:
-            progress = _get_progress(job)
-            detected = _detect_step(message)
+            progress = _get_progress(job, is_payment=is_payment)
+            detected = _detect_step(message, is_payment=progress.is_payment)
             if detected >= 0 and detected > progress.current_step:
                 progress.current_step = detected
             elif progress.current_step < 0:
@@ -179,7 +207,7 @@ class NotificationService:
         except Exception as exc:
             log.error("Notification failed for job %s: %s", job.job_id, exc)
 
-    def complete(self, job: Job, message: str) -> None:
+    def complete(self, job, message: str) -> None:
         if not job.chat_id:
             return
         try:
@@ -191,7 +219,7 @@ class NotificationService:
         except Exception as exc:
             log.error("Notification complete failed for job %s: %s", job.job_id, exc)
 
-    def fail(self, job: Job, message: str) -> None:
+    def fail(self, job, message: str) -> None:
         if not job.chat_id:
             return
         try:

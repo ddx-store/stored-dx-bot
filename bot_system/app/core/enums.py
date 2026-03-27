@@ -14,6 +14,11 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+class JobType(str, Enum):
+    REGISTRATION = "registration"
+    PAYMENT = "payment"
+
+
 class IntegrationMode(str, Enum):
     API = "api"
     PLAYWRIGHT = "playwright"

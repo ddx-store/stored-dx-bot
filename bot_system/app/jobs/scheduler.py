@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Dict
 
 from app.core.logger import get_logger
-from app.storage.models import Job
+from app.storage.models import CardInfo, Job, PaymentJob
 
 log = get_logger(__name__)
 
@@ -43,6 +43,28 @@ class Scheduler:
                 except Exception as notify_exc:
                     log.error("Failed to notify user about crash: %s", notify_exc)
             self._futures.pop(job.job_id, None)
+
+        future.add_done_callback(_on_done)
+
+    def submit_payment(self, pjob: PaymentJob, card: CardInfo) -> None:
+        from app.services.payment_service import PaymentService
+
+        service = PaymentService()
+
+        future = self._pool.submit(service.run_job, pjob, card)
+        self._futures[pjob.job_id] = future
+        log.info("Payment job %s submitted to scheduler", pjob.job_id)
+
+        def _on_done(f: Future) -> None:
+            exc = f.exception()
+            if exc:
+                log.error("Background payment job %s raised an uncaught exception: %s", pjob.job_id, exc)
+                try:
+                    from app.services.notification_service import NotificationService
+                    NotificationService().fail(pjob, f"خطأ غير متوقع: {exc}")
+                except Exception as notify_exc:
+                    log.error("Failed to notify user about payment crash: %s", notify_exc)
+            self._futures.pop(pjob.job_id, None)
 
         future.add_done_callback(_on_done)
 

@@ -71,6 +71,24 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_job ON audit_logs (job_id);
+
+CREATE TABLE IF NOT EXISTS payment_jobs (
+    job_id       TEXT PRIMARY KEY,
+    site_url     TEXT NOT NULL,
+    email        TEXT NOT NULL,
+    password     TEXT NOT NULL DEFAULT '',
+    plan_name    TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    error_msg    TEXT,
+    final_result TEXT,
+    chat_id      INTEGER,
+    message_id   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_pjobs_email  ON payment_jobs (email);
+CREATE INDEX IF NOT EXISTS idx_pjobs_status ON payment_jobs (status);
 """
 
 # Migration: add site_url column to existing databases that don't have it.

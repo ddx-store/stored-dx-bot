@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 
 from app.core.config import config
 from app.core.logger import get_logger
-from app.core.utils import is_valid_email, normalise_url
+from app.core.utils import is_valid_email, normalise_url, new_job_id
 
 log = get_logger(__name__)
 
@@ -21,7 +21,17 @@ PRESET_SITES = [
     {"label": "Twitter/X", "url": "x.com", "icon": "🐦"},
 ]
 
+PAYMENT_SITES = [
+    {"label": "ChatGPT Plus", "url": "chatgpt.com", "icon": "🤖"},
+    {"label": "Canva Pro", "url": "canva.com", "icon": "🎨"},
+    {"label": "ProtonVPN", "url": "protonvpn.com", "icon": "🔒"},
+    {"label": "Pixlr", "url": "pixlr.com", "icon": "🖼"},
+    {"label": "Replit", "url": "replit.com", "icon": "💻"},
+]
+
 _pending_site = {}
+
+_pending_payment = {}
 
 
 def _is_allowed(user_id: int) -> bool:
@@ -73,6 +83,25 @@ def _build_main_menu():
     if row:
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="site:custom")])
+    keyboard.append([InlineKeyboardButton("💳 الدفع التلقائي", callback_data="pay:menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _build_payment_menu():
+    keyboard = []
+    row = []
+    for i, site in enumerate(PAYMENT_SITES):
+        row.append(InlineKeyboardButton(
+            f"{site['icon']} {site['label']}",
+            callback_data=f"paysite:{site['url']}"
+        ))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="paysite:custom")])
+    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:menu")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -82,7 +111,17 @@ def _start_text():
         "║    بوت التسجيل التلقائي      ║\n"
         "╚══════════════════════════════╝\n"
         "\n"
-        "  اختر الموقع المطلوب:\n"
+        "  اختر الخدمة المطلوبة:\n"
+    )
+
+
+def _payment_text():
+    return (
+        "╔══════════════════════════════╗\n"
+        "║    💳 الدفع التلقائي          ║\n"
+        "╚══════════════════════════════╝\n"
+        "\n"
+        "  اختر الموقع للاشتراك:\n"
     )
 
 
@@ -104,17 +143,37 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "║         المساعدة             ║\n"
             "╚══════════════════════════════╝\n"
             "\n"
+            "  📝 التسجيل:\n"
             "  1. اضغط /start\n"
             "  2. اختر الموقع من الازرار\n"
             "  3. ارسل الايميل\n"
             "  4. انتظر النتيجة\n"
             "\n"
-            "  او استخدم:\n"
+            "  💳 الدفع:\n"
+            "  1. اضغط /pay او من القائمة\n"
+            "  2. اختر الموقع\n"
+            "  3. ارسل الايميل\n"
+            "  4. ارسل الباسوورد\n"
+            "  5. ارسل بيانات البطاقة\n"
+            "\n"
+            "  الاوامر:\n"
             "  /create site.com email@x.com\n"
+            "  /pay - الدفع التلقائي\n"
         )
         await update.message.reply_text(text)
     except Exception as exc:
         log.error("cmd_help error: %s\n%s", exc, traceback.format_exc())
+
+
+async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.info("cmd_pay called by user=%s", update.effective_user.id)
+    try:
+        if not _is_allowed(update.effective_user.id):
+            await update.message.reply_text("غير مصرح لك.")
+            return
+        await update.message.reply_text(_payment_text(), reply_markup=_build_payment_menu())
+    except Exception as exc:
+        log.error("cmd_pay error: %s\n%s", exc, traceback.format_exc())
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -128,6 +187,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     data = query.data or ""
     log.info("callback_handler: user=%s data=%s", user_id, data)
+
+    if data == "pay:menu":
+        _pending_site.pop(user_id, None)
+        _pending_payment.pop(user_id, None)
+        await query.edit_message_text(_payment_text(), reply_markup=_build_payment_menu())
+        return
 
     if data == "site:custom":
         _pending_site[user_id] = "__custom__"
@@ -147,7 +212,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "back:menu":
         _pending_site.pop(user_id, None)
+        _pending_payment.pop(user_id, None)
         await query.edit_message_text(_start_text(), reply_markup=_build_main_menu())
+        return
+
+    if data == "back:pay":
+        _pending_payment.pop(user_id, None)
+        await query.edit_message_text(_payment_text(), reply_markup=_build_payment_menu())
+        return
+
+    if data.startswith("paysite:"):
+        site_val = data[8:]
+
+        if site_val == "custom":
+            _pending_payment[user_id] = {"step": "custom_site"}
+            keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:pay")]]
+            await query.edit_message_text(
+                "╔══════════════════════════════╗\n"
+                "║    💳 موقع مخصص للدفع        ║\n"
+                "╚══════════════════════════════╝\n"
+                "\n"
+                "  ارسل رابط الموقع:\n"
+                "  مثال: site.com\n",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        site_label = site_val
+        for ps in PAYMENT_SITES:
+            if ps["url"] == site_val:
+                site_label = f"{ps['icon']} {ps['label']}"
+                break
+
+        _pending_payment[user_id] = {"step": "email", "site_url": site_val, "label": site_label}
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:pay")]]
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            f"║  💳 {site_label}\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  📧 ارسل الايميل (حساب الموقع):\n",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     if data.startswith("site:"):
@@ -176,6 +282,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (update.message.text or "").strip()
 
     if not _is_allowed(user.id):
+        return
+
+    payment = _pending_payment.get(user.id)
+    if payment:
+        await _handle_payment_text(update, user.id, text, payment)
         return
 
     pending = _pending_site.get(user.id)
@@ -216,6 +327,138 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     log.info("Received text from user=%s: %s", user.id, text[:100])
+
+
+async def _handle_payment_text(update: Update, user_id: int, text: str, payment: dict) -> None:
+    step = payment.get("step", "")
+
+    if step == "custom_site":
+        raw = text.strip().split()[0] if text.strip() else ""
+        if not raw:
+            await update.message.reply_text("ارسل رابط الموقع.")
+            return
+        raw = raw.rstrip("/.,;:!?")
+        payment["site_url"] = raw
+        payment["label"] = raw
+        payment["step"] = "email"
+        await update.message.reply_text(
+            "╔══════════════════════════════╗\n"
+            f"║  💳 {raw}\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  📧 ارسل الايميل (حساب الموقع):\n"
+        )
+        return
+
+    if step == "email":
+        email = text.strip()
+        if not is_valid_email(email):
+            await update.message.reply_text(f"  ❌  {email}\n  هذا مو ايميل صحيح.")
+            return
+        payment["email"] = email
+        payment["step"] = "password"
+        await update.message.reply_text(
+            f"  📧  {email}\n"
+            "\n"
+            "  🔑 ارسل الباسوورد:\n"
+        )
+        return
+
+    if step == "password":
+        password = text.strip()
+        if len(password) < 4:
+            await update.message.reply_text("الباسوورد قصير جدا.")
+            return
+        payment["password"] = password
+        payment["step"] = "card"
+        await update.message.reply_text(
+            "  💳 ارسل بيانات البطاقة بالتنسيق التالي:\n"
+            "\n"
+            "  رقم البطاقة\n"
+            "  MM/YY\n"
+            "  CVV\n"
+            "  اسم صاحب البطاقة\n"
+            "\n"
+            "  مثال:\n"
+            "  4111111111111111\n"
+            "  12/26\n"
+            "  123\n"
+            "  Ahmed Ali\n"
+        )
+        return
+
+    if step == "card":
+        card_data = _parse_card(text)
+        if not card_data:
+            await update.message.reply_text(
+                "  ❌ بيانات البطاقة غير صحيحة\n"
+                "\n"
+                "  ارسلها بهذا التنسيق:\n"
+                "  رقم البطاقة\n"
+                "  MM/YY\n"
+                "  CVV\n"
+                "  اسم صاحب البطاقة\n"
+            )
+            return
+
+        _pending_payment.pop(user_id, None)
+        await _start_payment_job(
+            update,
+            site_url=payment["site_url"],
+            email=payment["email"],
+            password=payment["password"],
+            card=card_data,
+        )
+        return
+
+
+def _parse_card(text: str):
+    from app.storage.models import CardInfo
+
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+
+    if len(lines) >= 4:
+        card_number = re.sub(r"[\s\-]", "", lines[0])
+        expiry = lines[1].strip()
+        cvv = lines[2].strip()
+        holder = " ".join(lines[3:]).strip()
+    else:
+        parts = text.split()
+        if len(parts) < 4:
+            return None
+        card_number = re.sub(r"[\s\-]", "", parts[0])
+        expiry = parts[1]
+        cvv = parts[2]
+        holder = " ".join(parts[3:]).strip()
+
+    if not re.match(r"^\d{13,19}$", card_number):
+        return None
+
+    exp_match = re.match(r"^(\d{1,2})/(\d{2,4})$", expiry)
+    if not exp_match:
+        return None
+
+    month = exp_match.group(1).zfill(2)
+    year = exp_match.group(2)
+    if len(year) == 4:
+        year = year[2:]
+
+    if not (1 <= int(month) <= 12):
+        return None
+
+    if not re.match(r"^\d{3,4}$", cvv):
+        return None
+
+    if not holder:
+        return None
+
+    return CardInfo(
+        number=card_number,
+        expiry_month=month,
+        expiry_year=year,
+        cvv=cvv,
+        holder_name=holder,
+    )
 
 
 async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,6 +510,27 @@ async def _start_job(update: Update, raw_site: str, email: str):
     from app.jobs.scheduler import scheduler
     scheduler.submit(job, config.FIXED_PASSWORD)
     log.info("Job submitted to scheduler: %s", job.job_id)
+
+
+async def _start_payment_job(update: Update, site_url: str, email: str, password: str, card):
+    from app.storage.models import PaymentJob
+
+    site_url_full = normalise_url(site_url)
+    job_id = new_job_id()
+
+    pjob = PaymentJob(
+        job_id=job_id,
+        site_url=site_url_full,
+        email=email,
+        password=password,
+        chat_id=update.effective_chat.id,
+    )
+
+    log.info("Payment job created: id=%s email=%s site=%s", job_id, email, site_url_full)
+
+    from app.jobs.scheduler import scheduler
+    scheduler.submit_payment(pjob, card)
+    log.info("Payment job submitted to scheduler: %s", job_id)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

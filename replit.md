@@ -1,8 +1,8 @@
-# Registration Bot
+# Registration & Payment Bot
 
 ## Overview
 
-Python Telegram bot (@STOREDDXBOT) that auto-registers accounts on any website using Playwright + headless Chromium. Users pick a site from inline buttons or use `/create site.com email@example.com`. The bot fills registration forms, handles OTP, and reports progress via a single editable Telegram message.
+Python Telegram bot (@STOREDDXBOT) that auto-registers accounts and auto-pays for subscriptions on any website using Playwright + headless Chromium. Users pick a site from inline buttons or use commands. The bot fills forms, handles OTP, processes payments, and reports progress via a single editable Telegram message.
 
 ## Stack
 
@@ -18,7 +18,7 @@ Python Telegram bot (@STOREDDXBOT) that auto-registers accounts on any website u
 bot_system/
   app/
     bot/
-      commands.py          # /start, /create, inline keyboard, callback + text handlers
+      commands.py          # /start, /create, /pay, inline keyboard, callback + text handlers
       handlers.py          # Handler registration (commands, callbacks, text)
       telegram_client.py   # send_message, edit_message, delete_message wrappers
     core/                  # Config, logging, enums, utils
@@ -27,29 +27,52 @@ bot_system/
     services/
       notification_service.py  # Single-message progress (edit in-place)
       registration_service.py  # Orchestrates Playwright + OTP flow
+      payment_service.py       # Orchestrates payment flow
     site/
-      playwright_client.py     # Main browser automation engine
+      playwright_client.py     # Main browser automation for registration
+      payment_client.py        # Browser automation for payment/subscription
     storage/               # SQLite DB, models, repositories
     main.py                # Entry point
 ```
 
-## How It Works
+## Features
 
+### 1. Auto-Registration
 1. User presses /start and picks a site from inline buttons (ChatGPT, Google, etc.)
 2. Bot asks for email only — user sends email text
 3. Bot creates a job, sends a single progress message with step indicators
 4. PlaywrightClient navigates to site, finds registration form, fills fields
-5. Progress message updates in-place (edit, not new messages) showing step-by-step status
+5. Progress message updates in-place showing step-by-step status
 6. OTP: polls Gmail IMAP, types code into verification form
 7. Final message shows all steps checked off with success/failure result
 
+### 2. Auto-Payment (NEW)
+1. User presses /pay or "💳 الدفع التلقائي" button from main menu
+2. Selects a subscription site (ChatGPT Plus, Canva Pro, ProtonVPN, Pixlr, Replit)
+3. Bot asks for email → password → card details (step by step)
+4. Card format: number, MM/YY, CVV, holder name (each on separate line)
+5. Bot logs into the site, navigates to upgrade/pricing page
+6. Fills payment form (supports Stripe iframes + direct card forms)
+7. Confirms payment and reports result
+
 ## UI Design
 
-- **Inline keyboard** with preset sites (ChatGPT, Google, Outlook, GitHub, Discord, X) + "custom site" option
+- **Inline keyboard** with preset sites + "custom site" + "💳 الدفع التلقائي" button
 - **Single editable message** for progress — 6-step checklist updated via `edit_message`
-- Steps: فتح الموقع → البحث عن التسجيل → تعبئة البيانات → إرسال النموذج → التحقق من البريد → إكمال الملف
-- Icons: ⬜ pending, ⏳ in-progress, ✅ done, ❌ failed
-- No Job IDs shown to user — clean professional look
+- Registration steps: فتح الموقع → البحث عن التسجيل → تعبئة البيانات → إرسال النموذج → التحقق من البريد → إكمال الملف
+- Payment steps: فتح الموقع → تسجيل الدخول → صفحة الاشتراك → تعبئة البطاقة → تأكيد الدفع → التحقق من النتيجة
+- Icons: ▫️ pending, ◐◓◑◒ in-progress (animated), ✅ done, ❌ failed
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `/start` | Main menu with registration + payment options |
+| `/pay` | Payment menu with subscription sites |
+| `/create site.com email` | Direct registration |
+| `/help` | Usage instructions |
+| `/status JOB_ID` | Check job status |
+| `/jobs` | List recent operations |
 
 ## Key Configuration
 
@@ -71,9 +94,10 @@ All settings via environment variables:
 ## Important Notes
 
 - JOB_TIMEOUT=350s, GLOBAL_TIMEOUT=300s to accommodate OTP polling
+- PAYMENT_TIMEOUT=300s for payment operations
 - ALL Telegram messages use plain text (no Markdown)
-- `_click_confirm_dialog`: clicks OK/Done/Got It dialogs after registration
-- `_try_url_smart`: accepts email-only forms (not just email+password)
-- Spinbutton birthday fill uses keyboard input (type + Tab) for React compatibility
-- `_DIRECT_AUTH_URLS` map for sites like ChatGPT that need direct auth URLs
-- Preset sites configurable in `PRESET_SITES` list in commands.py
+- Card data is NOT saved — user sends it fresh each time
+- Payment client handles Stripe iframes (js.stripe.com) + direct card forms
+- Preset payment sites: ChatGPT, Canva, ProtonVPN, Pixlr, Replit
+- Payment sites configurable in `PAYMENT_SITES` list in commands.py
+- Registration sites configurable in `PRESET_SITES` list in commands.py
