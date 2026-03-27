@@ -7,6 +7,9 @@ Commands:
   /status       — query a job by ID
   /jobs         — list recent jobs
   /help         — show help
+
+ALL messages use plain text (no parse_mode) to prevent silent failures
+from URLs containing underscores or other Markdown-special characters.
 """
 
 from __future__ import annotations
@@ -70,19 +73,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("cmd_start called by user=%s", update.effective_user.id)
     try:
         await update.message.reply_text(
-            "👋 *Registration Bot*\n\n"
-            "الأوامر المتاحة:\n\n"
-            "  `/create site.com email@example.com`\n"
-            "  ← يفتح الموقع وينشئ حساب بالإيميل\n\n"
-            "يقبل روابط طويلة أيضاً:\n"
-            "  `/create https://site.com/auth email@x.com`\n\n"
-            "  `/status JOB_ID`\n"
-            "  ← حالة العملية\n\n"
-            "  `/jobs`\n"
-            "  ← آخر العمليات\n\n"
-            "  `/help`\n\n"
-            f"الرمز الثابت المستخدم: `{config.FIXED_PASSWORD}`",
-            parse_mode="Markdown",
+            "Registration Bot\n"
+            "========================\n\n"
+            "الاوامر المتاحة:\n\n"
+            "  /create site.com email@example.com\n"
+            "  -- يفتح الموقع وينشئ حساب بالايميل\n\n"
+            "يقبل روابط طويلة ايضا:\n"
+            "  /create https://site.com/auth email@x.com\n\n"
+            "  /status JOB_ID\n"
+            "  -- حالة العملية\n\n"
+            "  /jobs\n"
+            "  -- اخر العمليات\n\n"
+            "  /help\n\n"
+            f"الرمز الثابت المستخدم: {config.FIXED_PASSWORD}",
         )
     except Exception as exc:
         log.error("cmd_start error: %s\n%s", exc, traceback.format_exc())
@@ -98,24 +101,24 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         if not _is_allowed(user.id):
-            await update.message.reply_text("⛔ غير مصرح لك باستخدام هذا البوت.")
+            await update.message.reply_text("غير مصرح لك باستخدام هذا البوت.")
             return
 
         raw_site, email = _parse_create_args(update.message.text or "")
 
         if not raw_site or not email:
             await update.message.reply_text(
-                "الاستخدام:\n`/create site.com email@example.com`\n\n"
-                "أمثلة:\n"
-                "`/create ddxstore.us myemail@gmail.com`\n"
-                "`/create https://site.com/register myemail@gmail.com`",
-                parse_mode="Markdown",
+                "الاستخدام:\n"
+                "  /create site.com email@example.com\n\n"
+                "امثلة:\n"
+                "  /create ddxstore.us myemail@gmail.com\n"
+                "  /create https://site.com/register myemail@gmail.com",
             )
             return
 
         if not is_valid_email(email):
             await update.message.reply_text(
-                f"❌ `{email}` ليس إيميل صحيح.", parse_mode="Markdown"
+                f"{email} ليس ايميل صحيح."
             )
             return
 
@@ -136,19 +139,19 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         log.info("Job submitted to scheduler: %s", job.job_id)
 
         await update.message.reply_text(
-            f"✅ تم قبول الطلب\n\n"
+            f"تم قبول الطلب\n\n"
             f"ID: {job.job_id}\n"
             f"الموقع: {site_url}\n"
-            f"الإيميل: {email}\n\n"
-            "سأبلغك بالتقدم فور حدوثه 🔄\n"
-            "⏱ الحد الأقصى: 60 ثانية",
+            f"الايميل: {email}\n\n"
+            "سابلغك بالتقدم فور حدوثه\n"
+            "الحد الاقصى: 60 ثانية",
         )
         log.info("Reply sent to user for job %s", job.job_id)
 
     except Exception as exc:
         log.error("cmd_create CRASHED: %s\n%s", exc, traceback.format_exc())
         try:
-            await update.message.reply_text(f"❌ خطأ: {exc}")
+            await update.message.reply_text(f"خطأ: {exc}")
         except Exception:
             pass
 
@@ -160,13 +163,13 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         if not _is_allowed(user.id):
-            await update.message.reply_text("⛔ غير مصرح.")
+            await update.message.reply_text("غير مصرح.")
             return
 
         args = context.args
         if not args:
             await update.message.reply_text(
-                "الاستخدام: `/status JOB_ID`", parse_mode="Markdown"
+                "الاستخدام: /status JOB_ID"
             )
             return
 
@@ -177,16 +180,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         job = job_manager.get(job_id)
         if not job:
             await update.message.reply_text(
-                f"Job `{job_id}` غير موجود.", parse_mode="Markdown"
+                f"Job {job_id} غير موجود."
             )
             return
 
         site_info = f"\n  الموقع: {job.site_url}" if job.site_url else ""
         text = (
-            f"• ID: {job.job_id}\n"
-            f"  الإيميل: {job.email}{site_info}\n"
+            f"ID: {job.job_id}\n"
+            f"  الايميل: {job.email}{site_info}\n"
             f"  الحالة: {job.status.value}\n"
-            f"  آخر تحديث: {job.updated_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"  اخر تحديث: {job.updated_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
             + (f"  خطأ: {job.error_msg}\n" if job.error_msg else "")
             + (f"  النتيجة: {job.final_result}\n" if job.final_result else "")
         )
@@ -195,7 +198,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         log.error("cmd_status error: %s\n%s", exc, traceback.format_exc())
         try:
-            await update.message.reply_text(f"❌ خطأ: {exc}")
+            await update.message.reply_text(f"خطأ: {exc}")
         except Exception:
             pass
 
@@ -207,7 +210,7 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         if not _is_allowed(user.id):
-            await update.message.reply_text("⛔ غير مصرح.")
+            await update.message.reply_text("غير مصرح.")
             return
 
         from app.jobs.job_manager import JobManager
@@ -218,11 +221,11 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("لا توجد عمليات بعد.")
             return
 
-        lines = ["آخر العمليات:\n"]
+        lines = ["اخر العمليات:\n"]
         for j in jobs:
             site_info = f" | {j.site_url}" if j.site_url else ""
             lines.append(
-                f"• {j.job_id} — {j.email}{site_info}\n"
+                f"-- {j.job_id} -- {j.email}{site_info}\n"
                 f"  الحالة: {j.status.value}"
                 + (f"\n  خطأ: {j.error_msg}" if j.error_msg else "")
             )
@@ -231,6 +234,6 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         log.error("cmd_jobs error: %s\n%s", exc, traceback.format_exc())
         try:
-            await update.message.reply_text(f"❌ خطأ: {exc}")
+            await update.message.reply_text(f"خطأ: {exc}")
         except Exception:
             pass
