@@ -100,3 +100,29 @@ class SavedAccount:
     detail: Optional[str] = None
     created_at: datetime = field(default_factory=utcnow)
     id: Optional[int] = None
+
+
+@dataclass
+class Proxy:
+    proxy_url: str
+    label: str = ""
+    active: bool = True
+    added_at: datetime = field(default_factory=utcnow)
+    id: Optional[int] = None
+
+
+@dataclass
+class BulkSession:
+    """In-memory only — tracks a bulk payment run (multiple cards, one account)."""
+    bulk_id: str
+    chat_id: int
+    site_url: str
+    email: str
+    password: str
+    plan_name: str = ""
+    billing_country: str = "US"
+    cards: list = field(default_factory=list)
+    results: list = field(default_factory=list)
+    total: int = 0
+    done: int = 0
+    success_count: int = 0

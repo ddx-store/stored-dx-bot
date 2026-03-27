@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+import threading
 import traceback
+from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -11,6 +13,38 @@ from app.core.logger import get_logger
 from app.core.utils import is_valid_email, normalise_url, new_job_id
 
 log = get_logger(__name__)
+
+_session_lock = threading.Lock()
+
+
+def _save_session(user_id: int, data: dict) -> None:
+    try:
+        from app.storage.repositories import PendingSessionRepository
+        PendingSessionRepository().save(user_id, data)
+    except Exception as e:
+        log.warning("Could not save session for user %s: %s", user_id, e)
+
+
+def _del_session(user_id: int) -> None:
+    try:
+        from app.storage.repositories import PendingSessionRepository
+        PendingSessionRepository().delete(user_id)
+    except Exception as e:
+        log.warning("Could not delete session for user %s: %s", user_id, e)
+
+
+def load_all_sessions() -> None:
+    """Called at startup — restores pending sessions from DB into _pending_payment."""
+    try:
+        from app.storage.repositories import PendingSessionRepository
+        sessions = PendingSessionRepository().load_all()
+        for uid, data in sessions.items():
+            _pending_payment[int(uid)] = data
+        if sessions:
+            log.info("Restored %d pending sessions from DB", len(sessions))
+    except Exception as e:
+        log.warning("Could not restore sessions: %s", e)
+
 
 PRESET_SITES = [
     {"label": "ChatGPT", "url": "chatgpt.com", "icon": "🤖"},
@@ -60,6 +94,21 @@ BILLING_COUNTRIES = [
 
 _pending_site = {}
 _pending_payment = {}
+_pending_proxy = {}
+
+
+def _build_proxy_menu(proxies: list) -> InlineKeyboardMarkup:
+    keyboard = []
+    for p in proxies:
+        status = "✅" if p.active else "⏸"
+        short = p.label or (p.proxy_url[:35] + "…" if len(p.proxy_url) > 35 else p.proxy_url)
+        keyboard.append([
+            InlineKeyboardButton(f"{status} {short}", callback_data=f"proxy_toggle:{p.id}"),
+            InlineKeyboardButton("🗑", callback_data=f"proxy_del:{p.id}"),
+        ])
+    keyboard.append([InlineKeyboardButton("➕ إضافة بروكسي", callback_data="proxy_add")])
+    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:home")])
+    return InlineKeyboardMarkup(keyboard)
 
 
 def _is_allowed(user_id: int) -> bool:
@@ -102,6 +151,7 @@ def _build_home_menu():
         [InlineKeyboardButton("📝  إنشاء حساب", callback_data="menu:register")],
         [InlineKeyboardButton("💳  تفعيل حساب", callback_data="menu:activate")],
         [InlineKeyboardButton("📋  حساباتي", callback_data="menu:accounts")],
+        [InlineKeyboardButton("🌐  البروكسيات", callback_data="menu:proxies")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -264,6 +314,29 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.error("cmd_pay error: %s\n%s", exc, traceback.format_exc())
 
 
+async def cmd_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    log.info("cmd_proxies called by user=%s", user.id)
+    try:
+        if not _is_allowed(user.id):
+            await update.message.reply_text("غير مصرح لك.")
+            return
+        from app.storage.repositories import ProxyRepository
+        proxies = ProxyRepository().list_all()
+        count_active = sum(1 for p in proxies if p.active)
+        await update.message.reply_text(
+            "╔══════════════════════════════╗\n"
+            "║   🌐  إدارة البروكسيات        ║\n"
+            "╚══════════════════════════════╝\n"
+            f"  إجمالي: {len(proxies)}  |  فعّال: {count_active}\n"
+            "\n"
+            "  ✅ = فعّال   ⏸ = معطّل   🗑 = حذف\n",
+            reply_markup=_build_proxy_menu(proxies),
+        )
+    except Exception as exc:
+        log.error("cmd_proxies error: %s\n%s", exc, traceback.format_exc())
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -358,6 +431,83 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _show_accounts(query)
         return
 
+    if data == "menu:proxies":
+        _pending_site.pop(user_id, None)
+        _pending_payment.pop(user_id, None)
+        from app.storage.repositories import ProxyRepository
+        proxies = ProxyRepository().list_all()
+        count_active = sum(1 for p in proxies if p.active)
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            "║   🌐  إدارة البروكسيات        ║\n"
+            "╚══════════════════════════════╝\n"
+            f"  إجمالي: {len(proxies)}  |  فعّال: {count_active}\n"
+            "\n"
+            "  ✅ = فعّال   ⏸ = معطّل   🗑 = حذف\n",
+            reply_markup=_build_proxy_menu(proxies),
+        )
+        return
+
+    if data == "proxy_add":
+        _pending_proxy[user_id] = {"step": "url"}
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            "║   🌐  إضافة بروكسي            ║\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  ارسل رابط البروكسي بالتنسيق:\n"
+            "  socks5://user:pass@host:port\n"
+            "  http://user:pass@host:port\n"
+            "  http://host:port\n"
+            "\n"
+            "  أو أرسله مع تسمية:\n"
+            "  socks5://host:1080 | اسم البروكسي\n",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ رجوع", callback_data="menu:proxies")]]),
+        )
+        return
+
+    if data.startswith("proxy_del:"):
+        proxy_id = int(data[10:])
+        from app.storage.repositories import ProxyRepository
+        repo = ProxyRepository()
+        deleted = repo.delete(proxy_id)
+        proxies = repo.list_all()
+        count_active = sum(1 for p in proxies if p.active)
+        msg = "  ✅ تم الحذف\n\n" if deleted else "  ❌ لم يُحذف\n\n"
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            "║   🌐  إدارة البروكسيات        ║\n"
+            "╚══════════════════════════════╝\n"
+            f"{msg}"
+            f"  إجمالي: {len(proxies)}  |  فعّال: {count_active}\n"
+            "\n"
+            "  ✅ = فعّال   ⏸ = معطّل   🗑 = حذف\n",
+            reply_markup=_build_proxy_menu(proxies),
+        )
+        return
+
+    if data.startswith("proxy_toggle:"):
+        proxy_id = int(data[13:])
+        from app.storage.repositories import ProxyRepository
+        repo = ProxyRepository()
+        all_p = repo.list_all()
+        target = next((p for p in all_p if p.id == proxy_id), None)
+        if target:
+            new_state = not target.active
+            repo.set_active(proxy_id, new_state)
+        proxies = repo.list_all()
+        count_active = sum(1 for p in proxies if p.active)
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            "║   🌐  إدارة البروكسيات        ║\n"
+            "╚══════════════════════════════╝\n"
+            f"  إجمالي: {len(proxies)}  |  فعّال: {count_active}\n"
+            "\n"
+            "  ✅ = فعّال   ⏸ = معطّل   🗑 = حذف\n",
+            reply_markup=_build_proxy_menu(proxies),
+        )
+        return
+
     if data.startswith("retry_reg:"):
         site_url = data[10:]
         _pending_site[user_id] = site_url
@@ -434,6 +584,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         payment["plan"] = plan_val
         payment["step"] = "email"
+        _save_session(user_id, payment)
         site_label = payment.get("label", payment.get("site_url", ""))
         keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
         await query.edit_message_text(
@@ -472,6 +623,35 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (update.message.text or "").strip()
 
     if not _is_allowed(user.id):
+        return
+
+    proxy_state = _pending_proxy.get(user.id)
+    if proxy_state and proxy_state.get("step") == "url":
+        _pending_proxy.pop(user.id, None)
+        raw = text.strip()
+        label = ""
+        if "|" in raw:
+            parts = raw.split("|", 1)
+            raw = parts[0].strip()
+            label = parts[1].strip()
+        if not re.match(r"^(https?|socks5|socks4)://", raw):
+            await update.message.reply_text(
+                "  ❌ التنسيق غير صحيح.\n"
+                "  مثال: socks5://user:pass@host:1080\n"
+                "  أو: http://host:port\n"
+            )
+            return
+        from app.storage.repositories import ProxyRepository
+        repo = ProxyRepository()
+        repo.add(raw, label)
+        proxies = repo.list_all()
+        count_active = sum(1 for p in proxies if p.active)
+        await update.message.reply_text(
+            "  ✅ تم إضافة البروكسي\n"
+            f"  {label or raw[:50]}\n"
+            "\n"
+            "  /proxies لإدارة البروكسيات\n"
+        )
         return
 
     payment = _pending_payment.get(user.id)
@@ -531,6 +711,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         payment["site_url"] = raw
         payment["label"] = raw
         payment["step"] = "plan"
+        _save_session(user_id, payment)
         plans = SITE_PLANS.get(raw, [])
         if plans:
             await update.message.reply_text(
@@ -543,6 +724,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             )
         else:
             payment["step"] = "plan_custom"
+            _save_session(user_id, payment)
             await update.message.reply_text(
                 "╔══════════════════════════════╗\n"
                 f"║  💳  {raw}\n"
@@ -559,6 +741,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             plan_val = ""
         payment["plan"] = plan_val
         payment["step"] = "email"
+        _save_session(user_id, payment)
         await update.message.reply_text(
             f"  ✅  الخطة: {plan_val or 'افتراضية'}\n"
             "\n"
@@ -573,6 +756,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             return
         payment["email"] = email
         payment["step"] = "password"
+        _save_session(user_id, payment)
         await update.message.reply_text(
             f"  ✅  {email}\n"
             "\n"
@@ -587,6 +771,7 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             return
         payment["password"] = password
         payment["step"] = "card"
+        _save_session(user_id, payment)
         await update.message.reply_text(
             "  ✅  تم حفظ الباسوورد\n"
             "\n"
@@ -602,10 +787,43 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             "  12/26\n"
             "  123\n"
             "  Ahmed Ali\n"
+            "\n"
+            "  📦 لإرسال عدة بطاقات: افصل بينها بـ ---\n"
         )
         return
 
     if step == "card":
+        if "---" in text or _count_card_blocks(text) > 1:
+            cards, errors = _parse_bulk_cards(text)
+            if not cards:
+                await update.message.reply_text(
+                    f"  ❌ لم أتعرف على أي بطاقة صحيحة\n"
+                    f"  {errors[0] if errors else ''}\n"
+                    "\n"
+                    "  تأكد من التنسيق: 4 أسطر لكل بطاقة مفصولة بـ ---\n"
+                )
+                return
+            bad_count = len(errors)
+            good_count = len(cards)
+            country = payment.get("billing_country", "US")
+            _pending_payment.pop(user_id, None)
+            _del_session(user_id)
+            summary_lines = [f"  📦 تم استلام {good_count} بطاقة"]
+            if bad_count:
+                summary_lines.append(f"  ⚠️ {bad_count} بطاقة لم تُتعرف عليها (تم تجاهلها)")
+            summary_lines.append("\n  جاري المعالجة الآن — ستصلك نتيجة كل بطاقة بشكل منفصل\n")
+            await update.message.reply_text("\n".join(summary_lines))
+            await _run_bulk_payment(
+                update,
+                site_url=payment["site_url"],
+                email=payment["email"],
+                password=payment["password"],
+                plan_name=payment.get("plan", ""),
+                billing_country=country,
+                cards=cards,
+            )
+            return
+
         card_data, card_error = _parse_card(text)
         if not card_data:
             await update.message.reply_text(
@@ -640,10 +858,13 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         if not card_data:
             await update.message.reply_text("حدث خطأ، ابدأ من جديد /start")
             _pending_payment.pop(user_id, None)
+            _del_session(user_id)
             return
 
         card_data.billing_zip = zip_code.upper()
+        card_data.billing_country = payment.get("billing_country", "US")
         _pending_payment.pop(user_id, None)
+        _del_session(user_id)
 
         masked = f"****{card_data.number[-4:]}"
         country = card_data.billing_country
@@ -664,6 +885,93 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             plan_name=payment.get("plan", ""),
         )
         return
+
+
+def _count_card_blocks(text: str) -> int:
+    """Count how many 4-line blocks (separated by blank lines) are in text."""
+    blocks = re.split(r"\n\s*\n", text.strip())
+    count = 0
+    for b in blocks:
+        lines = [l.strip() for l in b.strip().split("\n") if l.strip()]
+        if len(lines) >= 4:
+            count += 1
+    return count
+
+
+def _parse_bulk_cards(text: str):
+    """
+    Parse multiple card blocks from text.
+    Supports --- separator or blank-line-separated 4-line blocks.
+    Returns (valid_cards, error_messages).
+    """
+    if "---" in text:
+        raw_blocks = re.split(r"-{2,}", text)
+    else:
+        raw_blocks = re.split(r"\n\s*\n", text)
+
+    valid_cards = []
+    errors = []
+    for i, block in enumerate(raw_blocks, 1):
+        block = block.strip()
+        if not block:
+            continue
+        card, err = _parse_card(block)
+        if card:
+            valid_cards.append(card)
+        else:
+            errors.append(f"بطاقة {i}: {err}")
+    return valid_cards, errors
+
+
+async def _run_bulk_payment(
+    update,
+    site_url: str,
+    email: str,
+    password: str,
+    plan_name: str,
+    billing_country: str,
+    cards: list,
+) -> None:
+    """Submit all cards as individual payment jobs and track results."""
+    from app.storage.models import PaymentJob, CardInfo
+    from app.jobs.scheduler import scheduler
+    from app.services.notification_service import NotificationService
+    import asyncio
+    import threading
+
+    total = len(cards)
+    results = {"success": 0, "fail": 0, "done": 0, "lock": threading.Lock()}
+    chat_id = update.effective_chat.id
+    notify = NotificationService()
+
+    for idx, card in enumerate(cards, 1):
+        masked = f"****{card.number[-4:]}"
+        card.billing_country = billing_country
+        card.billing_zip = card.billing_zip or ""
+
+        job_id = new_job_id()
+        pjob = PaymentJob(
+            job_id=job_id,
+            site_url=normalise_url(site_url),
+            email=email,
+            password=password,
+            plan_name=plan_name,
+            chat_id=chat_id,
+        )
+
+        await update.message.reply_text(
+            f"  ⏳  بطاقة {idx}/{total}: ****{card.number[-4:]}\n"
+            "  جاري التفعيل...\n"
+        )
+
+        scheduler.submit_payment(pjob, card)
+        log.info("Bulk job %s submitted: card %d/%d masked=%s", job_id, idx, total, masked)
+
+    await update.message.reply_text(
+        f"  📦  تم إرسال {total} طلبات دفع\n"
+        "  ستصلك نتيجة كل واحدة بشكل منفصل\n"
+        "  /status للاستعلام عن الحالة\n"
+    )
 
 
 def _parse_card(text: str):

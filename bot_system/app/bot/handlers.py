@@ -12,9 +12,11 @@ from app.bot.commands import (
     cmd_help,
     cmd_jobs,
     cmd_pay,
+    cmd_proxies,
     cmd_start,
     cmd_status,
     callback_handler,
+    load_all_sessions,
     text_handler,
 )
 from app.core.logger import get_logger
@@ -31,10 +33,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 def register_handlers(app: Application) -> None:
+    load_all_sessions()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("create", cmd_create))
     app.add_handler(CommandHandler("pay", cmd_pay))
+    app.add_handler(CommandHandler("proxies", cmd_proxies))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("cancel", cmd_cancel))

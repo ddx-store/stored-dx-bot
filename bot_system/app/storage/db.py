@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from typing import Generator
 
 from app.core.config import config
 from app.core.logger import get_logger
+
+_local = threading.local()
 
 log = get_logger(__name__)
 
@@ -103,6 +106,23 @@ CREATE TABLE IF NOT EXISTS saved_accounts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_saved_chat ON saved_accounts (chat_id);
+
+CREATE TABLE IF NOT EXISTS proxies (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    label     TEXT NOT NULL DEFAULT '',
+    proxy_url TEXT NOT NULL,
+    active    INTEGER NOT NULL DEFAULT 1,
+    added_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_sessions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL UNIQUE,
+    session_data TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_user ON pending_sessions (user_id);
 """
 
 # Migration: add site_url column to existing databases that don't have it.
@@ -118,12 +138,19 @@ def _ensure_dir(path: str) -> None:
 
 
 def get_connection(path: str | None = None) -> sqlite3.Connection:
+    """
+    Returns a thread-local SQLite connection.
+    Each thread reuses its own connection instead of opening a new one every call.
+    """
     db_path = path or config.DB_PATH
-    _ensure_dir(db_path)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        _ensure_dir(db_path)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
     return conn
 
 
@@ -131,17 +158,19 @@ def init_db(path: str | None = None) -> None:
     """Create all tables if they do not exist, then run pending migrations."""
     db_path = path or config.DB_PATH
     _ensure_dir(db_path)
-    conn = get_connection(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
-        # Run migrations (ignore errors for already-applied ones).
         for sql in _MIGRATIONS:
             try:
                 conn.execute(sql)
                 conn.commit()
             except sqlite3.OperationalError:
-                pass  # Column already exists
+                pass
         log.info("Database initialised at %s", db_path)
     finally:
         conn.close()

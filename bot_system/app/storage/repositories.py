@@ -8,11 +8,13 @@ import sqlite3
 from datetime import datetime
 from typing import List, Optional
 
+import json
+
 from app.core.enums import JobStatus, OtpType
 from app.core.logger import get_logger
 from app.core.utils import utcnow
 from app.storage.db import get_connection
-from app.storage.models import AuditLog, Job, OtpMessage, Result, SavedAccount
+from app.storage.models import AuditLog, Job, OtpMessage, Proxy, Result, SavedAccount
 
 log = get_logger(__name__)
 
@@ -279,6 +281,117 @@ class SavedAccountRepository:
         )
         self._conn.commit()
         return cur.rowcount > 0
+
+
+class ProxyRepository:
+    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
+        self._conn = conn or get_connection()
+
+    def add(self, proxy_url: str, label: str = "") -> Proxy:
+        now = utcnow().isoformat()
+        cur = self._conn.execute(
+            "INSERT INTO proxies (label, proxy_url, active, added_at) VALUES (?, ?, 1, ?)",
+            (label, proxy_url, now),
+        )
+        self._conn.commit()
+        return Proxy(proxy_url=proxy_url, label=label, active=True, added_at=utcnow(), id=cur.lastrowid)
+
+    def list_all(self) -> List[Proxy]:
+        rows = self._conn.execute(
+            "SELECT * FROM proxies ORDER BY id ASC"
+        ).fetchall()
+        return [Proxy(
+            id=r["id"], proxy_url=r["proxy_url"], label=r["label"],
+            active=bool(r["active"]),
+            added_at=datetime.fromisoformat(r["added_at"]),
+        ) for r in rows]
+
+    def list_active(self) -> List[Proxy]:
+        rows = self._conn.execute(
+            "SELECT * FROM proxies WHERE active = 1 ORDER BY id ASC"
+        ).fetchall()
+        return [Proxy(
+            id=r["id"], proxy_url=r["proxy_url"], label=r["label"],
+            active=True,
+            added_at=datetime.fromisoformat(r["added_at"]),
+        ) for r in rows]
+
+    def get_random_active(self) -> Optional[Proxy]:
+        row = self._conn.execute(
+            "SELECT * FROM proxies WHERE active = 1 ORDER BY RANDOM() LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return Proxy(
+            id=row["id"], proxy_url=row["proxy_url"], label=row["label"],
+            active=True, added_at=datetime.fromisoformat(row["added_at"]),
+        )
+
+    def delete(self, proxy_id: int) -> bool:
+        cur = self._conn.execute("DELETE FROM proxies WHERE id = ?", (proxy_id,))
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def set_active(self, proxy_id: int, active: bool) -> None:
+        self._conn.execute(
+            "UPDATE proxies SET active = ? WHERE id = ?", (int(active), proxy_id)
+        )
+        self._conn.commit()
+
+
+class PendingSessionRepository:
+    """Persists _pending_payment sessions so they survive bot restarts."""
+
+    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
+        self._conn = conn or get_connection()
+
+    def save(self, user_id: int, session_data: dict) -> None:
+        data_str = json.dumps(session_data, default=str)
+        now = utcnow().isoformat()
+        self._conn.execute(
+            """
+            INSERT INTO pending_sessions (user_id, session_data, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET session_data = excluded.session_data,
+                                                updated_at   = excluded.updated_at
+            """,
+            (user_id, data_str, now),
+        )
+        self._conn.commit()
+
+    def load(self, user_id: int) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT session_data FROM pending_sessions WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["session_data"])
+        except Exception:
+            return None
+
+    def load_all(self) -> dict:
+        rows = self._conn.execute("SELECT user_id, session_data FROM pending_sessions").fetchall()
+        result = {}
+        for r in rows:
+            try:
+                result[r["user_id"]] = json.loads(r["session_data"])
+            except Exception:
+                pass
+        return result
+
+    def delete(self, user_id: int) -> None:
+        self._conn.execute("DELETE FROM pending_sessions WHERE user_id = ?", (user_id,))
+        self._conn.commit()
+
+    def delete_expired(self, hours: int = 48) -> int:
+        import datetime as dt
+        cutoff = (utcnow() - dt.timedelta(hours=hours)).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM pending_sessions WHERE updated_at < ?", (cutoff,)
+        )
+        self._conn.commit()
+        return cur.rowcount
 
 
 class CleanupRepository:

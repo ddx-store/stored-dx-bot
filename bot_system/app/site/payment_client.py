@@ -89,6 +89,54 @@ class PaymentClient:
         if self._progress_callback:
             self._progress_callback(msg)
 
+    async def pay_with_pool(
+        self,
+        pool,
+        site_url: str,
+        email: str,
+        password: str,
+        card_number: str,
+        card_expiry_month: str,
+        card_expiry_year: str,
+        card_cvv: str,
+        card_holder: str,
+        plan_name: str = "",
+        billing_zip: str = "",
+        billing_country: str = "US",
+        proxy_url: Optional[str] = None,
+        progress_callback: Optional[Callable] = None,
+    ) -> PaymentResult:
+        """
+        Uses the shared BrowserPool — no new Chromium process launched per job.
+        Only a new browser context (isolated session) is created.
+        """
+        self._progress_callback = progress_callback
+        context = None
+        try:
+            context = await pool.new_context(proxy_url=proxy_url)
+            page = await context.new_page()
+            result = await asyncio.wait_for(
+                self._do_payment(
+                    page, site_url, email, password,
+                    card_number, card_expiry_month, card_expiry_year,
+                    card_cvv, card_holder, plan_name,
+                    billing_zip, billing_country,
+                ),
+                timeout=PAYMENT_TIMEOUT,
+            )
+            return result
+        except asyncio.TimeoutError:
+            return PaymentResult(False, message=f"انتهى الوقت ({PAYMENT_TIMEOUT}ث)")
+        except Exception as exc:
+            log.error("Payment error (pool): %s", exc)
+            return PaymentResult(False, message=str(exc)[:200])
+        finally:
+            if context:
+                try:
+                    await asyncio.wait_for(context.close(), timeout=5)
+                except Exception:
+                    pass
+
     async def pay(
         self,
         site_url: str,
@@ -102,8 +150,10 @@ class PaymentClient:
         plan_name: str = "",
         billing_zip: str = "",
         billing_country: str = "US",
+        proxy_url: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
     ) -> PaymentResult:
+        """Fallback: launches its own Chromium process (used if pool is unavailable)."""
         self._progress_callback = progress_callback
         try:
             from playwright.async_api import async_playwright
@@ -124,14 +174,14 @@ class PaymentClient:
                     "--disable-extensions",
                     "--disable-infobars",
                     "--window-size=1920,1080",
-                    "--start-maximized",
                 ],
             }
             if chromium_path:
                 launch_args["executable_path"] = chromium_path
 
             browser = await pw_instance.chromium.launch(**launch_args)
-            context = await browser.new_context(
+
+            ctx_args = dict(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -150,6 +200,10 @@ class PaymentClient:
                     "sec-ch-ua-platform": '"Windows"',
                 },
             )
+            if proxy_url:
+                ctx_args["proxy"] = {"server": proxy_url}
+
+            context = await browser.new_context(**ctx_args)
             await context.add_init_script(_STEALTH_JS)
             page = await context.new_page()
 

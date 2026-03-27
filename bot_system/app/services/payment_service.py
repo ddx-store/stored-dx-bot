@@ -8,7 +8,7 @@ from app.core.logger import get_logger
 from app.services.notification_service import NotificationService
 from app.site.payment_client import PaymentClient
 from app.storage.models import CardInfo, PaymentJob, Result, SavedAccount
-from app.storage.repositories import ResultRepository, SavedAccountRepository
+from app.storage.repositories import ProxyRepository, ResultRepository, SavedAccountRepository
 
 log = get_logger(__name__)
 
@@ -20,11 +20,21 @@ class PaymentService:
         self._notify = NotificationService()
         self._results = ResultRepository()
         self._saved = SavedAccountRepository()
+        self._proxies = ProxyRepository()
 
     def run_job(self, pjob: PaymentJob, card: CardInfo) -> None:
         log.info("START payment job=%s site=%s email=%s", pjob.job_id, pjob.site_url, pjob.email)
 
         job_proxy = _PaymentJobProxy(pjob)
+
+        proxy_url: str | None = None
+        try:
+            p = self._proxies.get_random_active()
+            if p:
+                proxy_url = p.proxy_url
+                log.info("Payment job %s using proxy: %s", pjob.job_id, p.label or proxy_url[:40])
+        except Exception as pe:
+            log.warning("Could not fetch proxy: %s", pe)
 
         try:
             from app.jobs.scheduler import scheduler
@@ -40,44 +50,60 @@ class PaymentService:
                 self._notify.step(job_proxy, "\U0001f504", msg, is_payment=True)
 
             client = PaymentClient(timeout=8_000)
-            loop = asyncio.new_event_loop()
+
             try:
-                result = loop.run_until_complete(
-                    asyncio.wait_for(
-                        client.pay(
-                            site_url=pjob.site_url,
-                            email=pjob.email,
-                            password=pjob.password,
-                            card_number=card.number,
-                            card_expiry_month=card.expiry_month,
-                            card_expiry_year=card.expiry_year,
-                            card_cvv=card.cvv,
-                            card_holder=card.holder_name,
-                            plan_name=pjob.plan_name,
-                            billing_zip=card.billing_zip,
-                            billing_country=card.billing_country,
-                            progress_callback=on_progress,
-                        ),
-                        timeout=PAYMENT_JOB_TIMEOUT,
+                from app.site.browser_pool import browser_pool
+                future = browser_pool.submit(
+                    client.pay_with_pool(
+                        browser_pool,
+                        site_url=pjob.site_url,
+                        email=pjob.email,
+                        password=pjob.password,
+                        card_number=card.number,
+                        card_expiry_month=card.expiry_month,
+                        card_expiry_year=card.expiry_year,
+                        card_cvv=card.cvv,
+                        card_holder=card.holder_name,
+                        plan_name=pjob.plan_name,
+                        billing_zip=card.billing_zip,
+                        billing_country=card.billing_country,
+                        proxy_url=proxy_url,
+                        progress_callback=on_progress,
                     )
                 )
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"انتهى الوقت ({PAYMENT_JOB_TIMEOUT}ث) -- الموقع بطيء أو صفحة الدفع غير موجودة"
-                )
-            except RuntimeError as e:
-                if "__CANCELLED__" in str(e):
-                    self._handle_cancel(pjob, job_proxy)
-                    return
-                raise
-            finally:
-                loop.close()
+                result = future.result(timeout=PAYMENT_JOB_TIMEOUT)
+            except Exception as pool_exc:
+                log.warning("Browser pool error, falling back to standalone browser: %s", pool_exc)
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(
+                        asyncio.wait_for(
+                            client.pay(
+                                site_url=pjob.site_url,
+                                email=pjob.email,
+                                password=pjob.password,
+                                card_number=card.number,
+                                card_expiry_month=card.expiry_month,
+                                card_expiry_year=card.expiry_year,
+                                card_cvv=card.cvv,
+                                card_holder=card.holder_name,
+                                plan_name=pjob.plan_name,
+                                billing_zip=card.billing_zip,
+                                billing_country=card.billing_country,
+                                proxy_url=proxy_url,
+                                progress_callback=on_progress,
+                            ),
+                            timeout=PAYMENT_JOB_TIMEOUT,
+                        )
+                    )
+                finally:
+                    loop.close()
 
             if scheduler.is_cancelled(pjob.job_id):
                 self._handle_cancel(pjob, job_proxy)
                 return
 
-            log.info("Payment result: success=%s msg=%s", result.success, result.message)
+            log.info("Payment result: success=%s msg=%s", result.success, result.message)  
 
             if not result.success:
                 raise RuntimeError(result.message)
@@ -103,6 +129,9 @@ class PaymentService:
             log.info("Payment job %s DONE: %s", pjob.job_id, detail)
 
         except Exception as exc:
+            if "__CANCELLED__" in str(exc):
+                self._handle_cancel(pjob, job_proxy)
+                return
             msg = str(exc)[:200]
             log.error("Payment job %s FAILED: %s\n%s", pjob.job_id, msg, traceback.format_exc())
             pjob.status = JobStatus.FAILED
