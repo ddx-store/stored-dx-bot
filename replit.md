@@ -83,3 +83,6 @@ All settings via environment variables (see `bot_system/.env.example`):
 - `_open_verification_link`: opens verification links in Playwright browser instead of urllib
 - `otp_provider` callback: async function passed to register(), polls Gmail via thread executor
 - JOB_TIMEOUT=200s, GLOBAL_TIMEOUT=180s to accommodate OTP polling (up to 120s)
+- `_continue_profile_setup`: after OTP verification, continues filling any remaining forms (Create Profile, About You, etc.) up to 5 additional steps
+- `_find_skip_button`: detects and clicks skip/later/dismiss buttons when forms can't be filled
+- Profile continuation also triggers after successful non-OTP registration if more inputs appear

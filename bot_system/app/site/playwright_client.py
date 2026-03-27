@@ -226,6 +226,7 @@ class PlaywrightClient:
                     if otp_data:
                         otp_code = otp_data.get("code")
                         otp_link = otp_data.get("link")
+                        otp_done = False
 
                         if otp_link and otp_link.startswith("http"):
                             self._report("فتح رابط التحقق...")
@@ -233,21 +234,30 @@ class PlaywrightClient:
                                 page, context, otp_link
                             )
                             if verify_result and verify_result.success:
-                                return verify_result
+                                otp_done = True
 
-                        if otp_code:
+                        if not otp_done and otp_code:
                             self._report(f"إدخال رمز التحقق {otp_code}...")
                             verify_result = await self._fill_otp_code(
                                 page, otp_code
                             )
                             if verify_result:
-                                return verify_result
+                                otp_done = True
 
-                        return RegistrationResult(
-                            True,
-                            message=f"تم التسجيل -- الرمز: {otp_code or otp_link}",
-                            page_url=page.url,
+                        if not otp_done:
+                            return RegistrationResult(
+                                True,
+                                message=f"تم التسجيل -- الرمز: {otp_code or otp_link}",
+                                page_url=page.url,
+                            )
+
+                        self._report("تم التحقق -- جاري إكمال إنشاء الملف الشخصي...")
+                        profile_result = await self._continue_profile_setup(
+                            page, email, password, first, last, username, phone,
+                            api_responses
                         )
+                        return profile_result
+
                     else:
                         return RegistrationResult(
                             True, needs_otp=True,
@@ -261,6 +271,16 @@ class PlaywrightClient:
                         message=f"تم التسجيل -- خطأ في التحقق: {exc}",
                         page_url=result.page_url,
                     )
+
+            if not result.needs_otp and result.success:
+                more_inputs = await self._wait_for_inputs(page, max_wait=5)
+                if more_inputs > 0:
+                    self._report("جاري إكمال إنشاء الملف الشخصي...")
+                    profile_result = await self._continue_profile_setup(
+                        page, email, password, first, last, username, phone,
+                        api_responses
+                    )
+                    return profile_result
 
             return result
         except asyncio.TimeoutError:
@@ -456,6 +476,125 @@ class PlaywrightClient:
             message="تم إرسال النموذج -- تحقق من النتيجة",
             page_url=page.url
         )
+
+    async def _continue_profile_setup(
+        self, page, email, password, first, last, username, phone, api_responses
+    ) -> RegistrationResult:
+        max_profile_steps = 5
+        last_result = None
+
+        for step in range(1, max_profile_steps + 1):
+            await asyncio.sleep(2)
+            await self._wait_for_spa(page)
+
+            new_inputs = await self._wait_for_inputs(page, max_wait=6)
+            if new_inputs == 0:
+                body = ""
+                try:
+                    body = (await page.inner_text("body")).lower()
+                except Exception:
+                    pass
+                if any(kw in body for kw in _SUCCESS_KEYWORDS):
+                    return RegistrationResult(
+                        True,
+                        message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
+                        page_url=page.url,
+                    )
+                skip_btn = await self._find_skip_button(page)
+                if skip_btn:
+                    try:
+                        await skip_btn.click()
+                        self._report(f"تخطي الخطوة {step}...")
+                        await asyncio.sleep(2)
+                        await self._wait_for_spa(page)
+                        continue
+                    except Exception:
+                        pass
+                if last_result:
+                    return last_result
+                return RegistrationResult(
+                    True,
+                    message="تم التحقق وإنشاء الحساب بنجاح",
+                    page_url=page.url,
+                )
+
+            filled_count = await self._smart_fill(
+                page, email, password, first, last, username, phone
+            )
+
+            if filled_count == 0:
+                skip_btn = await self._find_skip_button(page)
+                if skip_btn:
+                    try:
+                        await skip_btn.click()
+                        self._report(f"تخطي الخطوة {step}...")
+                        await asyncio.sleep(2)
+                        await self._wait_for_spa(page)
+                        continue
+                    except Exception:
+                        pass
+                if last_result:
+                    return last_result
+                return RegistrationResult(
+                    True,
+                    message="تم التحقق وإنشاء الحساب بنجاح",
+                    page_url=page.url,
+                )
+
+            self._report(f"إكمال الملف الشخصي -- الخطوة {step}...")
+            before_url = page.url
+            api_responses.clear()
+            submitted = await self._smart_submit(page)
+            if not submitted:
+                skip_btn = await self._find_skip_button(page)
+                if skip_btn:
+                    try:
+                        await skip_btn.click()
+                        self._report(f"تخطي...")
+                        await asyncio.sleep(2)
+                        continue
+                    except Exception:
+                        pass
+                break
+
+            await asyncio.sleep(3)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+            step_result = await self._analyze(page, before_url, api_responses)
+            last_result = step_result
+            if not step_result.success:
+                return step_result
+
+        if last_result:
+            last_result.message = "تم إنشاء الحساب وإكمال الملف الشخصي بنجاح"
+            return last_result
+        return RegistrationResult(
+            True,
+            message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
+            page_url=page.url,
+        )
+
+    async def _find_skip_button(self, page):
+        skip_texts = [
+            "skip", "تخطي", "not now", "later", "maybe later",
+            "skip for now", "i'll do this later", "no thanks",
+            "remind me later", "dismiss",
+        ]
+        for text in skip_texts:
+            try:
+                btn = page.locator(
+                    f'button:has-text("{text}"), a:has-text("{text}"), '
+                    f'[role="button"]:has-text("{text}")'
+                ).first
+                if await btn.is_visible(timeout=500):
+                    return btn
+            except Exception:
+                continue
+        return None
 
     async def _fill_otp_code(self, page, code: str) -> RegistrationResult | None:
         await asyncio.sleep(2)
