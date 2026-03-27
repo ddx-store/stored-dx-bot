@@ -12,6 +12,25 @@ from app.core.logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _build_proxy_config(proxy_url: str) -> dict:
+    """
+    Convert a proxy URL (possibly with embedded credentials) into the
+    Playwright proxy dict with separate username/password fields.
+
+    Input:  http://user:pass@host:port   or   socks5://host:port
+    Output: {"server": "scheme://host:port", "username": "...", "password": "..."}
+    """
+    from urllib.parse import urlparse, unquote
+    p = urlparse(proxy_url)
+    server = f"{p.scheme}://{p.hostname}:{p.port}"
+    cfg: dict = {"server": server}
+    if p.username:
+        cfg["username"] = unquote(p.username)
+    if p.password:
+        cfg["password"] = unquote(p.password)
+    return cfg
+
 PAYMENT_TIMEOUT = 300
 
 _NAV_TIMEOUT = 20_000
@@ -115,6 +134,7 @@ class PaymentClient:
         billing_country: str = "US",
         proxy_url: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
+        job_id: str = "",
     ) -> PaymentResult:
         """
         Uses the shared BrowserPool — no new Chromium process launched per job.
@@ -131,6 +151,7 @@ class PaymentClient:
                     card_number, card_expiry_month, card_expiry_year,
                     card_cvv, card_holder, plan_name,
                     billing_zip, billing_country,
+                    job_id=job_id,
                 ),
                 timeout=PAYMENT_TIMEOUT,
             )
@@ -162,6 +183,7 @@ class PaymentClient:
         billing_country: str = "US",
         proxy_url: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
+        job_id: str = "",
     ) -> PaymentResult:
         """Fallback: launches its own Chromium process (used if pool is unavailable)."""
         self._progress_callback = progress_callback
@@ -211,7 +233,7 @@ class PaymentClient:
                 },
             )
             if proxy_url:
-                ctx_args["proxy"] = {"server": proxy_url}
+                ctx_args["proxy"] = _build_proxy_config(proxy_url)
 
             context = await browser.new_context(**ctx_args)
             await context.add_init_script(_STEALTH_JS)
@@ -223,6 +245,7 @@ class PaymentClient:
                     card_number, card_expiry_month, card_expiry_year,
                     card_cvv, card_holder, plan_name,
                     billing_zip, billing_country,
+                    job_id=job_id,
                 ),
                 timeout=PAYMENT_TIMEOUT,
             )
@@ -250,6 +273,7 @@ class PaymentClient:
         card_number, card_expiry_month, card_expiry_year,
         card_cvv, card_holder, plan_name,
         billing_zip="", billing_country="US",
+        job_id: str = "",
     ) -> PaymentResult:
         domain = urlparse(site_url).netloc.replace("www.", "")
 
@@ -265,7 +289,7 @@ class PaymentClient:
         page.on("response", _on_response)
 
         self._report("فتح الموقع...")
-        login_result = await self._login(page, site_url, domain, email, password)
+        login_result = await self._login(page, site_url, domain, email, password, job_id=job_id)
         if not login_result:
             return PaymentResult(False, message="فشل تسجيل الدخول")
 
@@ -327,7 +351,7 @@ class PaymentClient:
                     return PaymentResult(False, message=arabic_msg)
             return PaymentResult(False, message="لم أتأكد من نجاح الدفع -- تحقق يدوياً من حسابك")
 
-    async def _login(self, page, site_url, domain, email, password) -> bool:
+    async def _login(self, page, site_url, domain, email, password, job_id: str = "") -> bool:
         login_url = _LOGIN_URLS.get(domain, site_url)
         self._report("تسجيل الدخول...")
         try:
@@ -400,6 +424,13 @@ class PaymentClient:
                 await asyncio.sleep(3)
                 await self._wait_spa(page)
 
+        # --- OTP / email-verification step (e.g. ChatGPT suspicious login) ---
+        otp_handled = await self._handle_login_otp(page, email, job_id)
+        if otp_handled:
+            log.info("Login OTP handled successfully")
+            await asyncio.sleep(2)
+            await self._wait_spa(page)
+
         body = ""
         try:
             body = (await page.inner_text("body"))[:1000].lower()
@@ -414,6 +445,106 @@ class PaymentClient:
 
         log.info("Login completed, URL: %s", page.url[:120])
         return True
+
+    async def _handle_login_otp(self, page, email: str, job_id: str) -> bool:
+        """
+        Detect an OTP / verification-code prompt that some sites show after login.
+        If detected and job_id is provided, use Gmail OTP watcher to get and enter the code.
+        Returns True if an OTP was successfully entered, False otherwise (no prompt or failure).
+        """
+        _OTP_INPUT_SELECTORS = [
+            'input[autocomplete="one-time-code"]',
+            'input[name="code"]',
+            'input[name="otp"]',
+            'input[name="verification_code"]',
+            'input[placeholder*="code" i]',
+            'input[placeholder*="verification" i]',
+            'input[aria-label*="code" i]',
+        ]
+        _OTP_PAGE_KEYWORDS = [
+            "verify your email", "we sent a code", "check your email",
+            "enter the code", "verification code", "6-digit code",
+            "تحقق من بريدك", "رمز التحقق", "أدخل الرمز",
+        ]
+
+        # Quick body scan first
+        body = ""
+        try:
+            body = (await page.inner_text("body"))[:800].lower()
+        except Exception:
+            pass
+
+        page_looks_like_otp = any(kw in body for kw in _OTP_PAGE_KEYWORDS)
+
+        otp_input = None
+        for sel in _OTP_INPUT_SELECTORS:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=800):
+                    otp_input = el
+                    break
+            except Exception:
+                continue
+
+        if not otp_input and not page_looks_like_otp:
+            return False
+
+        log.info("OTP prompt detected during login for %s (job=%s)", email, job_id)
+        self._report("رمز التحقق مطلوب — جاري الانتظار...")
+
+        if not job_id:
+            log.warning("OTP prompt detected but no job_id — cannot fetch OTP from Gmail")
+            return False
+
+        try:
+            from app.gmail.otp_watcher import OtpWatcher, OtpTimeout
+
+            class _FakeJob:
+                def __init__(self, jid, em):
+                    self.job_id = jid
+                    self.email = em
+                    self.site_url = ""
+
+            fake_job = _FakeJob(job_id, email)
+            watcher = OtpWatcher()
+
+            otp_msg = await asyncio.get_event_loop().run_in_executor(
+                None, watcher.wait_for_otp, fake_job
+            )
+
+            code = otp_msg.otp_value or otp_msg.link_value
+            if not code:
+                log.warning("OTP watcher returned message but no code extracted")
+                return False
+
+            log.info("Got login OTP code=%s for job=%s", code, job_id)
+            self._report(f"تم استلام رمز التحقق ({code}) — جاري الإدخال...")
+
+            # Re-find the input in case page changed
+            if not otp_input:
+                for sel in _OTP_INPUT_SELECTORS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=500):
+                            otp_input = el
+                            break
+                    except Exception:
+                        continue
+
+            if otp_input:
+                await self._fill_input(otp_input, code)
+                await self._click_submit(page, ["verify", "confirm", "continue", "submit", "next", "تحقق", "تأكيد"])
+                await asyncio.sleep(2)
+                await self._wait_spa(page)
+                return True
+
+        except OtpTimeout:
+            log.warning("Login OTP timed out for job=%s email=%s", job_id, email)
+            self._report("انتهى الوقت في انتظار رمز التحقق")
+        except Exception as exc:
+            log.error("Error handling login OTP: %s", exc)
+
+        return False
 
     async def _navigate_to_upgrade(self, page, domain, plan_name) -> bool:
         upgrade_url = _UPGRADE_URLS.get(domain)

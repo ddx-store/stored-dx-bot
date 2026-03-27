@@ -129,7 +129,8 @@ class BrowserPool:
             },
         )
         if proxy_url:
-            ctx_args["proxy"] = {"server": proxy_url}
+            from app.site.payment_client import _build_proxy_config
+            ctx_args["proxy"] = _build_proxy_config(proxy_url)
 
         context = await self._browser.new_context(**ctx_args)
         await context.add_init_script(_STEALTH_JS)

@@ -69,6 +69,7 @@ class PaymentService:
                         billing_country=card.billing_country,
                         proxy_url=proxy_url,
                         progress_callback=on_progress,
+                        job_id=pjob.job_id,
                     )
                 )
                 result = future.result(timeout=PAYMENT_JOB_TIMEOUT)
@@ -92,6 +93,7 @@ class PaymentService:
                                 billing_country=card.billing_country,
                                 proxy_url=proxy_url,
                                 progress_callback=on_progress,
+                                job_id=pjob.job_id,
                             ),
                             timeout=PAYMENT_JOB_TIMEOUT,
                         )
