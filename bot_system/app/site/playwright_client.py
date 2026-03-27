@@ -273,57 +273,79 @@ class PlaywrightClient:
             )
 
             if result.needs_otp and otp_provider:
-                self._report("بانتظار رمز التحقق من البريد...")
-                try:
-                    otp_data = await otp_provider()
-                    if otp_data:
-                        otp_code = otp_data.get("code")
-                        otp_link = otp_data.get("link")
-                        otp_done = False
+                max_otp_attempts = 3
+                for otp_attempt in range(1, max_otp_attempts + 1):
+                    attempt_label = f"(المحاولة {otp_attempt}/{max_otp_attempts})" if otp_attempt > 1 else ""
+                    self._report(f"بانتظار رمز التحقق من البريد... {attempt_label}".strip())
+                    try:
+                        otp_data = await otp_provider()
+                        if otp_data:
+                            otp_code = otp_data.get("code")
+                            otp_link = otp_data.get("link")
+                            otp_done = False
 
-                        if otp_link and otp_link.startswith("http"):
-                            self._report("فتح رابط التحقق...")
-                            verify_result = await self._open_verification_link(
-                                page, context, otp_link
+                            if otp_link and otp_link.startswith("http"):
+                                self._report("فتح رابط التحقق...")
+                                verify_result = await self._open_verification_link(
+                                    page, context, otp_link
+                                )
+                                if verify_result and verify_result.success:
+                                    otp_done = True
+
+                            if not otp_done and otp_code:
+                                self._report(f"إدخال رمز التحقق {otp_code}...")
+                                verify_result = await self._fill_otp_code(
+                                    page, otp_code
+                                )
+                                if verify_result:
+                                    otp_done = True
+
+                            if not otp_done:
+                                return RegistrationResult(
+                                    True,
+                                    message=f"تم التسجيل -- الرمز: {otp_code or otp_link}",
+                                    page_url=page.url,
+                                )
+
+                            self._report("تم التحقق -- جاري إكمال إنشاء الملف الشخصي...")
+                            profile_result = await self._continue_profile_setup(
+                                page, email, password, first, last, username, phone,
+                                api_responses
                             )
-                            if verify_result and verify_result.success:
-                                otp_done = True
+                            return profile_result
 
-                        if not otp_done and otp_code:
-                            self._report(f"إدخال رمز التحقق {otp_code}...")
-                            verify_result = await self._fill_otp_code(
-                                page, otp_code
-                            )
-                            if verify_result:
-                                otp_done = True
-
-                        if not otp_done:
-                            return RegistrationResult(
-                                True,
-                                message=f"تم التسجيل -- الرمز: {otp_code or otp_link}",
-                                page_url=page.url,
-                            )
-
-                        self._report("تم التحقق -- جاري إكمال إنشاء الملف الشخصي...")
-                        profile_result = await self._continue_profile_setup(
-                            page, email, password, first, last, username, phone,
-                            api_responses
-                        )
-                        return profile_result
-
-                    else:
+                        else:
+                            if otp_attempt < max_otp_attempts:
+                                self._report(f"لم يصل الرمز -- جاري إعادة الإرسال... (المحاولة {otp_attempt + 1})")
+                                resent = await self._click_resend_otp(page)
+                                if resent:
+                                    log.info("Resend OTP clicked, attempt %d", otp_attempt + 1)
+                                    await asyncio.sleep(3)
+                                    continue
+                                else:
+                                    log.info("No resend button found, giving up")
+                                    return RegistrationResult(
+                                        True, needs_otp=True,
+                                        message="تم التسجيل -- لم يصل رمز التحقق",
+                                        page_url=result.page_url,
+                                    )
+                            else:
+                                return RegistrationResult(
+                                    True, needs_otp=True,
+                                    message="تم التسجيل -- لم يصل رمز التحقق بعد عدة محاولات",
+                                    page_url=result.page_url,
+                                )
+                    except Exception as exc:
+                        log.warning("OTP flow error (attempt %d): %s", otp_attempt, exc)
+                        if otp_attempt < max_otp_attempts:
+                            resent = await self._click_resend_otp(page)
+                            if resent:
+                                continue
                         return RegistrationResult(
                             True, needs_otp=True,
-                            message="تم التسجيل -- لم يصل رمز التحقق (انتهى الوقت)",
+                            message=f"تم التسجيل -- خطأ في التحقق: {exc}",
                             page_url=result.page_url,
                         )
-                except Exception as exc:
-                    log.warning("OTP flow error: %s", exc)
-                    return RegistrationResult(
-                        True, needs_otp=True,
-                        message=f"تم التسجيل -- خطأ في التحقق: {exc}",
-                        page_url=result.page_url,
-                    )
 
             if not result.needs_otp and result.success:
                 more_inputs = await self._wait_for_inputs(page, max_wait=5)
@@ -1163,6 +1185,52 @@ class PlaywrightClient:
                         return True
             except Exception:
                 continue
+        return False
+
+    async def _click_resend_otp(self, page) -> bool:
+        resend_texts = [
+            "resend", "resend code", "resend email", "send again",
+            "didn't receive", "didn't get", "try again",
+            "send new code", "request new code", "new code",
+            "إعادة إرسال", "إعادة الإرسال", "أرسل مرة أخرى",
+            "ارسل مرة اخرى", "لم يصل", "رمز جديد",
+        ]
+        for text in resend_texts:
+            try:
+                btn = page.locator(
+                    f'button:has-text("{text}"), a:has-text("{text}"), '
+                    f'[role="button"]:has-text("{text}"), '
+                    f'span:has-text("{text}"), div[role="link"]:has-text("{text}")'
+                ).first
+                if await btn.is_visible(timeout=500):
+                    btn_text = (await btn.inner_text()).strip()
+                    if len(btn_text) < 60:
+                        log.info("-> Clicking resend OTP: '%s'", btn_text)
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        return True
+            except Exception:
+                continue
+
+        try:
+            links = page.locator('a, button, [role="button"], span[tabindex]')
+            count = await links.count()
+            for i in range(count):
+                el = links.nth(i)
+                try:
+                    if not await el.is_visible(timeout=200):
+                        continue
+                    el_text = (await el.inner_text()).strip().lower()
+                    if any(kw in el_text for kw in ["resend", "send again", "new code", "إعادة"]):
+                        log.info("-> Found resend via scan: '%s'", el_text[:40])
+                        await el.click()
+                        await asyncio.sleep(2)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         return False
 
     async def _find_skip_button(self, page):

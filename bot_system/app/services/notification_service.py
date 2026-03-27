@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from typing import Dict, Optional, List, Tuple
 
 from app.core.logger import get_logger
@@ -9,59 +10,99 @@ from app.storage.models import Job
 log = get_logger(__name__)
 
 _PROGRESS_STEPS = [
-    ("فتح الموقع", "🔘"),
-    ("البحث عن التسجيل", "🔘"),
-    ("تعبئة البيانات", "🔘"),
-    ("إرسال النموذج", "🔘"),
-    ("التحقق من البريد", "🔘"),
-    ("إكمال الملف", "🔘"),
+    "فتح الموقع",
+    "البحث عن التسجيل",
+    "تعبئة البيانات",
+    "إرسال النموذج",
+    "التحقق من البريد",
+    "إكمال الملف",
 ]
+
+_ANIM_FRAMES = ["◐", "◓", "◑", "◒"]
 
 
 class JobProgress:
     def __init__(self, job: Job):
         self.job = job
         self.message_id: Optional[int] = None
-        self.steps: List[Tuple[str, str]] = [
-            (label, icon) for label, icon in _PROGRESS_STEPS
-        ]
         self.current_step = -1
         self.status_line = ""
         self.is_done = False
         self.is_failed = False
         self.result_text = ""
+        self._frame = 0
+        self._start_time = time.time()
+
+    def _elapsed(self) -> str:
+        secs = int(time.time() - self._start_time)
+        m, s = divmod(secs, 60)
+        return f"{m:02d}:{s:02d}"
+
+    def _progress_bar(self) -> str:
+        total = len(_PROGRESS_STEPS)
+        if self.is_done:
+            done = total
+        elif self.current_step < 0:
+            done = 0
+        else:
+            done = self.current_step
+        filled = min(done, total)
+        bar = "█" * filled + "░" * (total - filled)
+        pct = int((filled / total) * 100)
+        return f"  [{bar}] {pct}%"
 
     def _build_text(self) -> str:
         lines = []
-        lines.append(f"{'━' * 28}")
-        lines.append(f"  الموقع: {self.job.site_url}")
-        lines.append(f"  الايميل: {self.job.email}")
-        lines.append(f"{'━' * 28}")
+
+        lines.append("╔══════════════════════════════╗")
+        lines.append("║    بوت التسجيل التلقائي      ║")
+        lines.append("╚══════════════════════════════╝")
         lines.append("")
 
-        for i, (label, _) in enumerate(self.steps):
+        lines.append(f"  🌐  {self.job.site_url}")
+        lines.append(f"  📧  {self.job.email}")
+        lines.append("")
+
+        lines.append(self._progress_bar())
+        lines.append("")
+
+        for i, label in enumerate(_PROGRESS_STEPS):
             if self.is_done:
                 icon = "✅"
             elif self.is_failed and i > self.current_step:
-                icon = "⬜"
+                icon = "▫️"
             elif i < self.current_step:
                 icon = "✅"
             elif i == self.current_step:
-                icon = "⏳" if not self.is_failed else "❌"
+                if self.is_failed:
+                    icon = "❌"
+                else:
+                    self._frame = (self._frame + 1) % len(_ANIM_FRAMES)
+                    icon = _ANIM_FRAMES[self._frame]
             else:
-                icon = "⬜"
+                icon = "▫️"
+
+            connector = "┃" if i < len(_PROGRESS_STEPS) - 1 else " "
             lines.append(f"  {icon}  {label}")
+            if i < len(_PROGRESS_STEPS) - 1:
+                if self.is_done or i < self.current_step:
+                    lines.append(f"  ┃")
+                else:
+                    lines.append(f"  ╎")
 
         lines.append("")
+        lines.append(f"  ⏱  {self._elapsed()}")
 
         if self.is_done:
-            lines.append(f"{'━' * 28}")
-            lines.append(f"  ✅  {self.result_text}")
-            lines.append(f"{'━' * 28}")
+            lines.append("")
+            lines.append("┌─────────────────────────────┐")
+            lines.append(f"│  ✅  {self.result_text}")
+            lines.append("└─────────────────────────────┘")
         elif self.is_failed:
-            lines.append(f"{'━' * 28}")
-            lines.append(f"  ❌  {self.result_text}")
-            lines.append(f"{'━' * 28}")
+            lines.append("")
+            lines.append("┌─────────────────────────────┐")
+            lines.append(f"│  ❌  {self.result_text}")
+            lines.append("└─────────────────────────────┘")
         elif self.status_line:
             lines.append(f"  💬  {self.status_line}")
 

@@ -72,19 +72,27 @@ def _build_main_menu():
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🌐 موقع آخر", callback_data="site:custom")])
+    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="site:custom")])
     return InlineKeyboardMarkup(keyboard)
+
+
+def _start_text():
+    return (
+        "╔══════════════════════════════╗\n"
+        "║    بوت التسجيل التلقائي      ║\n"
+        "╚══════════════════════════════╝\n"
+        "\n"
+        "  اختر الموقع المطلوب:\n"
+    )
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("cmd_start called by user=%s", update.effective_user.id)
     try:
-        text = (
-            "مرحبا بك في بوت التسجيل التلقائي\n"
-            f"{'━' * 30}\n\n"
-            "اختر الموقع اللي تبي تسجل فيه:\n"
-        )
-        await update.message.reply_text(text, reply_markup=_build_main_menu())
+        if not _is_allowed(update.effective_user.id):
+            await update.message.reply_text("غير مصرح لك.")
+            return
+        await update.message.reply_text(_start_text(), reply_markup=_build_main_menu())
     except Exception as exc:
         log.error("cmd_start error: %s\n%s", exc, traceback.format_exc())
 
@@ -92,14 +100,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         text = (
-            "طريقة الاستخدام\n"
-            f"{'━' * 30}\n\n"
-            "1. اضغط /start واختر الموقع\n"
-            "2. ارسل الايميل وبس\n"
-            "3. البوت يسوي كل شي تلقائي\n\n"
-            "او استخدم الامر:\n"
-            "  /create site.com email@example.com\n\n"
-            f"الرقم السري الثابت: {config.FIXED_PASSWORD}\n"
+            "╔══════════════════════════════╗\n"
+            "║         المساعدة             ║\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  1. اضغط /start\n"
+            "  2. اختر الموقع من الازرار\n"
+            "  3. ارسل الايميل\n"
+            "  4. انتظر النتيجة\n"
+            "\n"
+            "  او استخدم:\n"
+            "  /create site.com email@x.com\n"
         )
         await update.message.reply_text(text)
     except Exception as exc:
@@ -112,7 +123,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     user_id = query.from_user.id
     if not _is_allowed(user_id):
-        await query.edit_message_text("غير مصرح لك باستخدام هذا البوت.")
+        await query.edit_message_text("غير مصرح لك.")
         return
 
     data = query.data or ""
@@ -120,21 +131,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "site:custom":
         _pending_site[user_id] = "__custom__"
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:menu")]]
         await query.edit_message_text(
-            "ارسل رابط الموقع والايميل:\n\n"
-            "مثال:\n"
-            "  site.com email@example.com\n"
-            "  https://site.com/register email@example.com"
+            "╔══════════════════════════════╗\n"
+            "║       موقع مخصص             ║\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  ارسل الموقع والايميل:\n"
+            "\n"
+            "  مثال:\n"
+            "  site.com email@example.com\n",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
 
     if data == "back:menu":
-        text = (
-            "مرحبا بك في بوت التسجيل التلقائي\n"
-            f"{'━' * 30}\n\n"
-            "اختر الموقع اللي تبي تسجل فيه:\n"
-        )
-        await query.edit_message_text(text, reply_markup=_build_main_menu())
+        _pending_site.pop(user_id, None)
+        await query.edit_message_text(_start_text(), reply_markup=_build_main_menu())
         return
 
     if data.startswith("site:"):
@@ -146,10 +159,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 break
 
         _pending_site[user_id] = site_url
-        keyboard = [[InlineKeyboardButton("رجوع", callback_data="back:menu")]]
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:menu")]]
         await query.edit_message_text(
-            f"الموقع: {site_label}\n\n"
-            "ارسل الايميل فقط:",
+            "╔══════════════════════════════╗\n"
+            f"║  {site_label}\n"
+            "╚══════════════════════════════╝\n"
+            "\n"
+            "  📧 ارسل الايميل:\n",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -168,11 +184,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         _pending_site.pop(user.id, None)
         email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
         if not email_match:
-            await update.message.reply_text(
-                "ما لقيت ايميل.\n\n"
-                "ارسل الموقع والايميل:\n"
-                "  site.com email@example.com"
-            )
+            await update.message.reply_text("ما لقيت ايميل. ارسل الموقع + الايميل.")
             return
 
         email = email_match.group(0).lower()
@@ -198,15 +210,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         _pending_site.pop(user.id, None)
         email = text.strip()
         if not is_valid_email(email):
-            await update.message.reply_text(
-                f"{email}\n"
-                "هذا مو ايميل صحيح. ارسل ايميل صالح."
-            )
+            await update.message.reply_text(f"  ❌  {email}\n  هذا مو ايميل صحيح.")
             return
         await _start_job(update, pending, email)
         return
 
-    log.info("Received non-command text from user=%s: %s", user.id, text[:100])
+    log.info("Received text from user=%s: %s", user.id, text[:100])
 
 
 async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,21 +224,21 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         if not _is_allowed(user.id):
-            await update.message.reply_text("غير مصرح لك باستخدام هذا البوت.")
+            await update.message.reply_text("غير مصرح لك.")
             return
 
         raw_site, email = _parse_create_args(update.message.text or "")
 
         if not raw_site or not email:
             await update.message.reply_text(
-                "الاستخدام:\n"
+                "  الاستخدام:\n"
                 "  /create site.com email@example.com\n\n"
-                "او اضغط /start واختر الموقع من الازرار"
+                "  او اضغط /start"
             )
             return
 
         if not is_valid_email(email):
-            await update.message.reply_text(f"{email} ليس ايميل صحيح.")
+            await update.message.reply_text(f"  ❌  {email} ليس ايميل صحيح.")
             return
 
         await _start_job(update, raw_site, email)
@@ -262,8 +271,6 @@ async def _start_job(update: Update, raw_site: str, email: str):
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    log.info("cmd_status called by user=%s", user.id)
-
     try:
         if not _is_allowed(user.id):
             await update.message.reply_text("غير مصرح.")
@@ -271,7 +278,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         args = context.args
         if not args:
-            await update.message.reply_text("الاستخدام: /status JOB_ID")
+            await update.message.reply_text("  الاستخدام: /status JOB_ID")
             return
 
         from app.jobs.job_manager import JobManager
@@ -280,32 +287,27 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         job_id = args[0]
         job = job_manager.get(job_id)
         if not job:
-            await update.message.reply_text(f"Job {job_id} غير موجود.")
+            await update.message.reply_text(f"  ❌  {job_id} غير موجود.")
             return
 
-        site_info = f"\n  الموقع: {job.site_url}" if job.site_url else ""
+        status_icon = "✅" if job.status.value == "completed" else "❌" if job.status.value == "failed" else "⏳"
         text = (
-            f"ID: {job.job_id}\n"
-            f"  الايميل: {job.email}{site_info}\n"
-            f"  الحالة: {job.status.value}\n"
-            f"  اخر تحديث: {job.updated_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
-            + (f"  خطأ: {job.error_msg}\n" if job.error_msg else "")
-            + (f"  النتيجة: {job.final_result}\n" if job.final_result else "")
+            f"  {status_icon}  {job.status.value}\n"
+            f"  📧  {job.email}\n"
+            f"  🌐  {job.site_url}\n"
         )
+        if job.error_msg:
+            text += f"  ❌  {job.error_msg}\n"
+        if job.final_result:
+            text += f"  📋  {job.final_result}\n"
         await update.message.reply_text(text)
 
     except Exception as exc:
         log.error("cmd_status error: %s\n%s", exc, traceback.format_exc())
-        try:
-            await update.message.reply_text(f"خطأ: {exc}")
-        except Exception:
-            pass
 
 
 async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    log.info("cmd_jobs called by user=%s", user.id)
-
     try:
         if not _is_allowed(user.id):
             await update.message.reply_text("غير مصرح.")
@@ -316,23 +318,20 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         jobs = job_manager.list_recent(limit=10)
         if not jobs:
-            await update.message.reply_text("لا توجد عمليات بعد.")
+            await update.message.reply_text("  لا توجد عمليات بعد.")
             return
 
-        lines = ["اخر العمليات:\n"]
+        lines = ["╔══════════════════════════════╗"]
+        lines.append("║       اخر العمليات           ║")
+        lines.append("╚══════════════════════════════╝")
+        lines.append("")
         for j in jobs:
             status_icon = "✅" if j.status.value == "completed" else "❌" if j.status.value == "failed" else "⏳"
-            site_info = f" | {j.site_url}" if j.site_url else ""
-            lines.append(
-                f"{status_icon} {j.email}{site_info}\n"
-                f"   {j.status.value}"
-                + (f" -- {j.error_msg}" if j.error_msg else "")
-            )
-        await update.message.reply_text("\n\n".join(lines))
+            lines.append(f"  {status_icon}  {j.email}")
+            if j.site_url:
+                lines.append(f"      🌐 {j.site_url}")
+            lines.append("")
+        await update.message.reply_text("\n".join(lines))
 
     except Exception as exc:
         log.error("cmd_jobs error: %s\n%s", exc, traceback.format_exc())
-        try:
-            await update.message.reply_text(f"خطأ: {exc}")
-        except Exception:
-            pass
