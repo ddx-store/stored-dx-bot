@@ -157,6 +157,7 @@ _REGISTER_PATHS = [
 _DIRECT_AUTH_URLS = {
     "chatgpt.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&prompt=login",
     "chat.openai.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&prompt=login",
+    "canva.com": "https://www.canva.com/signup",
 }
 
 _OTP_KEYWORDS = [
@@ -1450,6 +1451,9 @@ class PlaywrightClient:
             "continue with password", "use password",
             "sign in with password", "use a password",
             "log in with password", "enter password instead",
+            "continue with email", "sign up with email",
+            "register with email", "use email instead",
+            "log in with email", "sign in with email",
         ]
         for text in password_link_texts:
             try:
@@ -1459,6 +1463,40 @@ class PlaywrightClient:
                     return True
             except Exception:
                 continue
+        return False
+
+    async def _try_continue_with_email_link(self, page) -> bool:
+        email_link_texts = [
+            "continue with email", "sign up with email",
+            "register with email", "use email instead",
+            "log in with email", "sign in with email",
+            "email address", "use email",
+        ]
+        for text in email_link_texts:
+            try:
+                link = page.get_by_text(text, exact=False).first
+                if await link.is_visible(timeout=400):
+                    tag = await link.evaluate("el => el.tagName.toLowerCase()")
+                    if tag in ("a", "button", "span", "div", "p", "label"):
+                        await link.click()
+                        log.info("-> Clicked '%s' link to reveal email form", text)
+                        return True
+            except Exception:
+                continue
+
+        for sel in [
+            'button:has-text("email")', 'a:has-text("email")',
+            '[data-testid*="email"]', '[aria-label*="email" i]',
+        ]:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=400):
+                    await btn.click()
+                    log.info("-> Clicked email button via selector: %s", sel)
+                    return True
+            except Exception:
+                continue
+
         return False
 
     async def _navigate_to_register(self, page, site_url: str) -> bool:
@@ -1508,6 +1546,14 @@ class PlaywrightClient:
                             return True
                         if await self._has_email_only_form(page):
                             return True
+                        clicked_email = await self._try_continue_with_email_link(page)
+                        if clicked_email:
+                            await asyncio.sleep(1.5)
+                            await self._wait_for_spa(page)
+                            if await self._has_fillable_form(page):
+                                return True
+                            if await self._has_email_only_form(page):
+                                return True
                         btn_clicked = True
                         break
                 except Exception:
@@ -1668,6 +1714,16 @@ class PlaywrightClient:
             if await self._has_email_only_form(page):
                 log.info("-> Found email-only form at %s", page.url[:80])
                 return True
+
+            clicked_email = await self._try_continue_with_email_link(page)
+            if clicked_email:
+                await asyncio.sleep(1.5)
+                await self._wait_for_spa(page)
+                if await self._has_fillable_form(page):
+                    return True
+                if await self._has_email_only_form(page):
+                    return True
+
             if await self._click_register_tab(page):
                 await asyncio.sleep(1)
                 if await self._has_fillable_form(page):
@@ -1836,7 +1892,11 @@ class PlaywrightClient:
             return False
 
         continue_btn = None
-        for text in ["continue", "next", "التالي", "متابعة", "إرسال"]:
+        for text in [
+            "continue", "next", "التالي", "متابعة", "إرسال",
+            "sign up", "signup", "create account", "get started",
+            "register", "إنشاء حساب", "سجل", "تسجيل", "ابدأ",
+        ]:
             try:
                 btn = page.get_by_text(text, exact=False).first
                 if await btn.is_visible(timeout=300):
@@ -1846,7 +1906,8 @@ class PlaywrightClient:
                 continue
 
         if not continue_btn:
-            for sel in ['button[type="submit"]', 'input[type="submit"]']:
+            for sel in ['button[type="submit"]', 'input[type="submit"]',
+                        'button[data-testid*="signup"]', 'button[data-testid*="email"]']:
                 try:
                     btn = page.locator(sel).first
                     if await btn.is_visible(timeout=300):

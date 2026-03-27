@@ -14,6 +14,7 @@ log = get_logger(__name__)
 
 PRESET_SITES = [
     {"label": "ChatGPT", "url": "chatgpt.com", "icon": "🤖"},
+    {"label": "Canva", "url": "canva.com", "icon": "🎨"},
     {"label": "Google", "url": "google.com", "icon": "🔍"},
     {"label": "Outlook", "url": "outlook.com", "icon": "📧"},
     {"label": "GitHub", "url": "github.com", "icon": "💻"},
