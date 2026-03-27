@@ -887,23 +887,77 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         return
 
 
+_FIRST_NAMES = [
+    "James", "John", "Robert", "Michael", "William", "David", "Richard", "Joseph",
+    "Thomas", "Charles", "Emily", "Emma", "Olivia", "Sophia", "Isabella", "Ava",
+    "Mia", "Charlotte", "Amelia", "Harper", "Lucas", "Liam", "Noah", "Ethan",
+    "Mason", "Logan", "Oliver", "Aiden", "Carter", "Jackson", "Daniel", "Matthew",
+    "Henry", "Alexander", "Benjamin", "Grace", "Lily", "Chloe", "Victoria", "Natalie",
+]
+_LAST_NAMES = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+    "Wilson", "Anderson", "Taylor", "Thomas", "Jackson", "White", "Harris",
+    "Martin", "Thompson", "Moore", "Young", "Allen", "Walker", "Hall", "King",
+    "Wright", "Scott", "Green", "Adams", "Baker", "Nelson", "Carter",
+]
+
+
+def _random_holder() -> str:
+    import random
+    return f"{random.choice(_FIRST_NAMES)} {random.choice(_LAST_NAMES)}"
+
+
+_PIPE_RE = re.compile(r"^(\d{13,19})\|(\d{1,2})\|(\d{2,4})\|(\d{3,4})\s*[\s✅❌✔✗\u2714\u2716]*$")
+
+
+def _is_pipe_line(line: str) -> bool:
+    return bool(_PIPE_RE.match(line.strip()))
+
+
 def _count_card_blocks(text: str) -> int:
-    """Count how many 4-line blocks (separated by blank lines) are in text."""
-    blocks = re.split(r"\n\s*\n", text.strip())
+    """
+    Count card entries — supports:
+      - pipe format: one card per line (number|MM|YYYY|cvv)
+      - 4-line blocks separated by blank lines or ---
+    """
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    pipe_count = sum(1 for l in lines if _is_pipe_line(l))
+    if pipe_count >= 1:
+        return pipe_count
+    blocks = re.split(r"\n\s*\n|-{2,}", text.strip())
     count = 0
     for b in blocks:
-        lines = [l.strip() for l in b.strip().split("\n") if l.strip()]
-        if len(lines) >= 4:
+        ls = [l.strip() for l in b.strip().split("\n") if l.strip()]
+        if len(ls) >= 4:
             count += 1
     return count
 
 
 def _parse_bulk_cards(text: str):
     """
-    Parse multiple card blocks from text.
-    Supports --- separator or blank-line-separated 4-line blocks.
+    Parse multiple cards from text.
+    Supports:
+      - Pipe format (one per line): number|MM|YYYY|cvv  [✅ optional]
+      - 4-line blocks separated by --- or blank lines
     Returns (valid_cards, error_messages).
     """
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    pipe_count = sum(1 for l in lines if _is_pipe_line(l))
+
+    if pipe_count > 0:
+        valid_cards = []
+        errors = []
+        for i, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            card, err = _parse_card(line)
+            if card:
+                valid_cards.append(card)
+            elif err:
+                errors.append(f"سطر {i}: {err}")
+        return valid_cards, errors
+
     if "---" in text:
         raw_blocks = re.split(r"-{2,}", text)
     else:
@@ -978,7 +1032,34 @@ def _parse_card(text: str):
     from app.storage.models import CardInfo
     from datetime import date
 
-    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    raw = text.strip()
+    raw = re.sub(r"[\s✅❌✔✗\u2714\u2716]+$", "", raw).strip()
+
+    pipe_m = _PIPE_RE.match(raw)
+    if pipe_m:
+        card_number = pipe_m.group(1)
+        month = pipe_m.group(2).zfill(2)
+        year_raw = pipe_m.group(3)
+        cvv = pipe_m.group(4)
+        holder = _random_holder()
+        year = year_raw[2:] if len(year_raw) == 4 else year_raw.zfill(2)
+
+        if not (1 <= int(month) <= 12):
+            return None, "الشهر غير صحيح"
+        today = date.today()
+        full_year = 2000 + int(year)
+        if full_year < today.year or (full_year == today.year and int(month) < today.month):
+            return None, "البطاقة منتهية الصلاحية"
+
+        return CardInfo(
+            number=card_number,
+            expiry_month=month,
+            expiry_year=year,
+            cvv=cvv,
+            holder_name=holder,
+        ), None
+
+    lines = [l.strip() for l in raw.split("\n") if l.strip()]
 
     if len(lines) >= 4:
         card_number = re.sub(r"[\s\-]", "", lines[0])
@@ -986,7 +1067,7 @@ def _parse_card(text: str):
         cvv = lines[2].strip()
         holder = " ".join(lines[3:]).strip()
     else:
-        parts = text.split()
+        parts = raw.split()
         if len(parts) < 4:
             return None, "أرسل 4 أسطر: رقم البطاقة، تاريخ الانتهاء، CVV، الاسم"
         card_number = re.sub(r"[\s\-]", "", parts[0])
