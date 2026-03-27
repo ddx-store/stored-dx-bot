@@ -364,6 +364,18 @@ class PlaywrightClient:
                 for status, url, method in api_responses
             )
 
+            has_register_api = any(
+                method == "POST" and 200 <= status < 300
+                and any(k in url.lower() for k in ["register", "signup", "sign-up", "join", "create-account"])
+                for status, url, method in api_responses
+            )
+            if has_register_api:
+                return RegistrationResult(
+                    True,
+                    message="تم إنشاء الحساب بنجاح",
+                    page_url=page.url
+                )
+
             if step_result.needs_otp:
                 can_use_pw = await self._try_continue_with_password(page)
                 if can_use_pw:
@@ -418,8 +430,46 @@ class PlaywrightClient:
             if await self._try_url_smart(page, site_url):
                 return True
 
-        if await self._quick_homepage_check(page, base_url):
-            return True
+        homepage_loaded = await self._load_homepage(page, base_url)
+
+        if homepage_loaded:
+            if await self._has_fillable_form(page, require_register_context=True):
+                return True
+
+            register_link = await self._find_register_link(page)
+            if register_link:
+                try:
+                    await register_link.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    await self._wait_for_spa(page)
+                    if await self._click_register_tab(page):
+                        await asyncio.sleep(1)
+                        if await self._has_fillable_form(page):
+                            return True
+                    elif await self._has_fillable_form(page, require_register_context=True):
+                        return True
+                except Exception:
+                    pass
+            else:
+                signup_btn_texts = [
+                    "sign up for free", "sign up", "signup", "register",
+                    "create account", "get started", "إنشاء حساب",
+                    "سجل الآن", "سجل", "تسجيل",
+                ]
+                for text in signup_btn_texts:
+                    try:
+                        btn = page.get_by_text(text, exact=False).first
+                        if await btn.is_visible(timeout=400):
+                            await btn.click()
+                            await asyncio.sleep(2)
+                            await self._wait_for_spa(page)
+                            if await self._has_fillable_form(page):
+                                return True
+                            if await self._has_email_only_form(page):
+                                return True
+                            break
+                    except Exception:
+                        continue
 
         for path in _REGISTER_PATHS:
             url = urljoin(base_url + "/", path)
@@ -434,10 +484,41 @@ class PlaywrightClient:
         if await self._try_homepage_form(page, base_url):
             return True
 
-        if await self._try_homepage_links(page, base_url):
+        if await self._quick_homepage_check(page, base_url):
             return True
 
         return False
+
+    async def _load_homepage(self, page, base_url: str) -> bool:
+        try:
+            resp = await page.goto(base_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            status = resp.status if resp else 0
+            if status == 403 or status == 503:
+                self._report("حماية Cloudflare -- جاري المحاولة...")
+                cf_ok = await self._wait_for_cf(page, max_wait=12)
+                if not cf_ok:
+                    return False
+            elif status >= 400:
+                return False
+            await self._wait_for_spa(page)
+            return True
+        except Exception:
+            return False
+
+    async def _find_register_link(self, page):
+        link_selectors = [
+            'a[href*="register"]', 'a[href*="signup"]', 'a[href*="sign-up"]',
+            'a[href*="join"]', 'a[href*="create-account"]',
+            'a[href*="auth"]', 'a[href*="login"]', 'a[href*="account"]',
+        ]
+        for sel in link_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=400):
+                    return loc
+            except Exception:
+                continue
+        return None
 
     async def _quick_homepage_check(self, page, base_url: str) -> bool:
         try:
