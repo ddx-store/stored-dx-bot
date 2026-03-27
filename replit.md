@@ -122,9 +122,20 @@ bot_system/
   README.md
 ```
 
+### How it works
+The bot uses **Playwright + system Chromium** (installed via Nix) for real browser automation:
+1. Navigates to the site's auth/register page
+2. Detects login vs. register tabs and switches to registration mode
+3. Fills ALL visible form fields (name, phone, email, password, etc.) intelligently
+4. Submits the form and analyzes API responses + page content for success/OTP/error
+5. If OTP needed: polls Gmail via IMAP for verification codes
+
+### System Dependencies (Nix)
+Chromium and its dependencies are installed via Nix: chromium, nspr, nss, gtk3, mesa, alsa-lib, etc.
+
 ### Key files to edit
-- `app/site/api_client.py` — plug in your site's endpoint URLs and request/response shapes
-- `app/site/playwright_client.py` — CSS selectors and URLs for browser fallback
+- `app/site/playwright_client.py` — browser automation, form detection, field filling
+- `app/site/http_client.py` — HTTP-only fallback (for non-JS sites)
 - `.env.example` → copy to `.env` and fill in tokens/keys
 
 ### Tests
