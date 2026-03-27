@@ -1881,7 +1881,8 @@ class PlaywrightClient:
         email_input = await page.query_selector(
             'input[type="email"], input[name="email"], '
             'input[placeholder*="email" i], input[placeholder*="mail" i], '
-            'input[autocomplete="email"]'
+            'input[autocomplete="email"], '
+            'input[autocomplete="username"], input[name="username"]'
         )
         if not email_input:
             return False
@@ -1947,6 +1948,8 @@ class PlaywrightClient:
                     autocomplete = (await inp.get_attribute("autocomplete") or "").lower()
                     hint = f"{name} {placeholder} {autocomplete}"
                     if "email" in hint or "mail" in hint:
+                        has_email = True
+                    elif name == "username" or autocomplete == "username":
                         has_email = True
                     elif "pass" in hint:
                         has_password = True
@@ -2061,19 +2064,31 @@ class PlaywrightClient:
                     filled.append(f"last_name={last}")
                     filled_types.add("last_name")
                 elif any(k in hint for k in [
-                    "full", "name", "الاسم", "اسمك", "your name",
-                    "display", "displayname"
-                ]):
-                    await self._fill_field(inp, f"{first} {last}")
-                    filled.append(f"name={first} {last}")
-                    filled_types.add("name")
-                elif any(k in hint for k in [
                     "username", "user_name", "user-name",
                     "المستخدم", "اسم المستخدم", "nickname"
                 ]):
-                    await self._fill_field(inp, username)
-                    filled.append(f"username={username}")
-                    filled_types.add("username")
+                    if "email" not in filled_types and (
+                        autocomplete == "username" or name == "username"
+                    ):
+                        await self._fill_field(inp, email)
+                        filled.append(f"username(email)={email}")
+                        filled_types.add("email")
+                        filled_types.add("username")
+                    elif "username" not in filled_types:
+                        await self._fill_field(inp, username)
+                        filled.append(f"username={username}")
+                        filled_types.add("username")
+                elif any(k in hint for k in [
+                    "full_name", "fullname", "full-name",
+                    "display_name", "displayname", "display-name",
+                    "your name", "اسمك", "الاسم الكامل",
+                ]) or (
+                    autocomplete == "name" or
+                    (name == "name" and "user" not in hint)
+                ):
+                    await self._fill_field(inp, f"{first} {last}")
+                    filled.append(f"name={first} {last}")
+                    filled_types.add("name")
                 elif any(k in hint for k in ["address", "عنوان"]):
                     await self._fill_field(inp, "123 Main Street")
                     filled.append("address=123 Main Street")
