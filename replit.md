@@ -74,3 +74,7 @@ All settings via environment variables (see `bot_system/.env.example`):
 - `drop_pending_updates=True` means commands sent during restart are lost — user must resend
 - System Chromium found via `CHROMIUM_PATH` env var or `shutil.which("chromium")`
 - PlaywrightClient timeouts: 8s nav + 50s internal + 60s job-level
+- `_smart_submit` filters out OAuth buttons (Google, Microsoft, Apple, etc.) to click correct submit
+- API URL matching uses `urlparse(url).path` only, not query params (avoids false positives)
+- Multi-step forms: `_wait_for_inputs()` polls up to 8s for SPA-rendered inputs between steps
+- Navigation: tries signup buttons first, then register links (avoids clicking login links first)

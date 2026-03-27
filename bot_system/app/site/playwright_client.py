@@ -354,27 +354,27 @@ class PlaywrightClient:
 
             step_result = await self._analyze(page, before_url, api_responses)
             last_result = step_result
-
             if not step_result.success:
                 return step_result
 
             has_api_success = any(
                 method == "POST" and 200 <= status < 300
-                and any(k in url.lower() for k in ["register", "signup", "auth", "account", "join", "create", "password"])
+                and any(k in urlparse(url).path.lower() for k in [
+                    "register", "signup", "sign-up", "auth", "account",
+                    "join", "create", "password",
+                ])
                 for status, url, method in api_responses
             )
 
-            has_register_api = any(
-                method == "POST" and 200 <= status < 300
-                and any(k in url.lower() for k in ["register", "signup", "sign-up", "join", "create-account"])
-                for status, url, method in api_responses
-            )
-            if has_register_api:
-                return RegistrationResult(
-                    True,
-                    message="تم إنشاء الحساب بنجاح",
-                    page_url=page.url
-                )
+            _REG_API_KW = ["register", "signup", "sign-up", "join", "create-account"]
+            has_register_api = False
+            for status, url, method in api_responses:
+                if method == "POST" and 200 <= status < 300:
+                    url_path = urlparse(url).path.lower()
+                    if any(k in url_path for k in _REG_API_KW):
+                        log.info("-> register API match: %s %s", status, url[:120])
+                        has_register_api = True
+                        break
 
             if step_result.needs_otp:
                 can_use_pw = await self._try_continue_with_password(page)
@@ -385,10 +385,17 @@ class PlaywrightClient:
                     continue
                 return step_result
 
+            if has_register_api:
+                return RegistrationResult(
+                    True,
+                    message="تم إنشاء الحساب بنجاح",
+                    page_url=page.url
+                )
+
             if any(kw in step_result.message for kw in ["تم إنشاء الحساب", "بنجاح"]):
                 return step_result
 
-            new_inputs = await self._count_visible_inputs(page)
+            new_inputs = await self._wait_for_inputs(page, max_wait=8)
             if new_inputs == 0:
                 if has_api_success:
                     step_result.message = "تم إنشاء الحساب بنجاح"
@@ -404,6 +411,17 @@ class PlaywrightClient:
             message="تم إرسال النموذج -- تحقق من النتيجة",
             page_url=page.url
         )
+
+    async def _wait_for_inputs(self, page, max_wait: float = 8.0) -> int:
+        elapsed = 0.0
+        interval = 1.5
+        while elapsed < max_wait:
+            count = await self._count_visible_inputs(page)
+            if count > 0:
+                return count
+            await asyncio.sleep(interval)
+            elapsed += interval
+        return 0
 
     async def _try_continue_with_password(self, page) -> bool:
         password_link_texts = [
@@ -436,6 +454,26 @@ class PlaywrightClient:
             if await self._has_fillable_form(page, require_register_context=True):
                 return True
 
+            signup_btn_texts = [
+                "sign up for free", "sign up", "signup", "register",
+                "create account", "get started", "إنشاء حساب",
+                "سجل الآن", "سجل", "تسجيل",
+            ]
+            for text in signup_btn_texts:
+                try:
+                    btn = page.get_by_text(text, exact=False).first
+                    if await btn.is_visible(timeout=400):
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        await self._wait_for_spa(page)
+                        if await self._has_fillable_form(page):
+                            return True
+                        if await self._has_email_only_form(page):
+                            return True
+                        break
+                except Exception:
+                    continue
+
             register_link = await self._find_register_link(page)
             if register_link:
                 try:
@@ -450,26 +488,6 @@ class PlaywrightClient:
                         return True
                 except Exception:
                     pass
-            else:
-                signup_btn_texts = [
-                    "sign up for free", "sign up", "signup", "register",
-                    "create account", "get started", "إنشاء حساب",
-                    "سجل الآن", "سجل", "تسجيل",
-                ]
-                for text in signup_btn_texts:
-                    try:
-                        btn = page.get_by_text(text, exact=False).first
-                        if await btn.is_visible(timeout=400):
-                            await btn.click()
-                            await asyncio.sleep(2)
-                            await self._wait_for_spa(page)
-                            if await self._has_fillable_form(page):
-                                return True
-                            if await self._has_email_only_form(page):
-                                return True
-                            break
-                    except Exception:
-                        continue
 
         for path in _REGISTER_PATHS:
             url = urljoin(base_url + "/", path)
@@ -947,6 +965,11 @@ class PlaywrightClient:
         await asyncio.sleep(random.uniform(0.03, 0.1))
 
     async def _smart_submit(self, page) -> bool:
+        _OAUTH_SKIP = [
+            "google", "microsoft", "apple", "facebook", "github",
+            "twitter", "linkedin", "phone", "sms", "هاتف",
+        ]
+
         submit_texts = [
             "إنشاء حساب", "تسجيل", "سجل", "أنشئ حساب",
             "register", "sign up", "create account", "submit",
@@ -956,10 +979,16 @@ class PlaywrightClient:
 
         for text in submit_texts:
             try:
-                btn = page.locator(f'button:has-text("{text}")').first
-                if await btn.is_visible(timeout=300):
-                    await btn.click()
-                    return True
+                candidates = page.locator(f'button:has-text("{text}")')
+                count = await candidates.count()
+                for i in range(min(count, 5)):
+                    btn = candidates.nth(i)
+                    if await btn.is_visible(timeout=300):
+                        btn_text = (await btn.inner_text()).strip().lower()
+                        if any(skip in btn_text for skip in _OAUTH_SKIP):
+                            continue
+                        await btn.click()
+                        return True
             except Exception:
                 continue
 
@@ -972,6 +1001,12 @@ class PlaywrightClient:
             try:
                 btn = page.locator(sel_str).first
                 if await btn.is_visible(timeout=500):
+                    try:
+                        btn_text = (await btn.inner_text()).strip().lower()
+                    except Exception:
+                        btn_text = ""
+                    if any(skip in btn_text for skip in _OAUTH_SKIP):
+                        continue
                     await btn.click()
                     return True
             except Exception:
@@ -985,6 +1020,8 @@ class PlaywrightClient:
                     if text and len(text) < 30 and text not in (
                         "x", "close", "cancel", "إلغاء", "إغلاق"
                     ):
+                        if any(skip in text for skip in _OAUTH_SKIP):
+                            continue
                         await btn.click()
                         return True
         except Exception:
@@ -1001,8 +1038,8 @@ class PlaywrightClient:
 
         for status, url, method in api_responses:
             if method == "POST":
-                url_lower = url.lower()
-                if any(k in url_lower for k in [
+                url_path = urlparse(url).path.lower()
+                if any(k in url_path for k in [
                     "register", "signup", "sign-up", "auth",
                     "account", "join", "create",
                 ]):
