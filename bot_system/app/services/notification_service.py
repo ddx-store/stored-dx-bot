@@ -1,5 +1,8 @@
 """
 Notification service — sends step-by-step updates back to Telegram.
+
+All messages use plain text (no Markdown) to avoid silent failures
+from special characters in URLs or Arabic text.
 """
 
 from __future__ import annotations
@@ -12,12 +15,11 @@ log = get_logger(__name__)
 
 class NotificationService:
     def step(self, job: Job, icon: str, message: str) -> None:
-        """Send a single step update to the user."""
         if not job.chat_id:
             return
-        text = f"{icon} Job `{job.job_id}`\n{message}"
+        text = f"{icon} Job {job.job_id}\n{message}"
         try:
             from app.bot.telegram_client import send_message
             send_message(job.chat_id, text)
         except Exception as exc:
-            log.error("Notification failed: %s", exc)
+            log.error("Notification failed for job %s: %s", job.job_id, exc)

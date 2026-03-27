@@ -31,32 +31,38 @@ class RegistrationService:
         self._jobs = JobManager()
         self._notify = NotificationService()
         self._results = ResultRepository()
-        self._client = PlaywrightClient(timeout=8_000)
 
     def run_job(self, job: Job, password: str) -> None:
-        log.info("▶ START job=%s site=%s email=%s", job.job_id, job.site_url, job.email)
+        log.info("START job=%s site=%s email=%s", job.job_id, job.site_url, job.email)
 
         try:
             self._jobs.transition(job.job_id, JobStatus.CREATING_ACCOUNT)
-            self._notify.step(job, "1️⃣", f"جاري فتح الموقع `{job.site_url}`...")
+            self._notify.step(job, "1️⃣", f"جاري فتح الموقع {job.site_url}")
 
             if not job.site_url:
                 raise RuntimeError("لم يتم تحديد الموقع")
 
+            def on_progress(msg: str):
+                self._notify.step(job, "🔄", msg)
+
+            client = PlaywrightClient(timeout=8_000)
             loop = asyncio.new_event_loop()
             try:
                 result = loop.run_until_complete(
                     asyncio.wait_for(
-                        self._client.register(
+                        client.register(
                             site_url=job.site_url,
                             email=job.email,
                             password=password,
+                            progress_callback=on_progress,
                         ),
                         timeout=JOB_TIMEOUT,
                     )
                 )
             except asyncio.TimeoutError:
-                raise RuntimeError(f"انتهى الوقت ({JOB_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل")
+                raise RuntimeError(
+                    f"انتهى الوقت ({JOB_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل"
+                )
             finally:
                 loop.close()
 
@@ -66,12 +72,12 @@ class RegistrationService:
             if not result.success:
                 raise RuntimeError(result.message)
 
-            self._notify.step(job, "3️⃣", "تم ملء النموذج وإرساله ✓")
+            self._notify.step(job, "3️⃣", "تم ملء النموذج وإرساله")
 
             if result.needs_otp and config.GMAIL_USER and config.GMAIL_APP_PASSWORD:
                 self._handle_otp(job)
             else:
-                self._finish(job, result.message or "✅ تم إنشاء الحساب")
+                self._finish(job, result.message or "تم إنشاء الحساب")
 
         except Exception as exc:
             msg = str(exc)[:200]
@@ -83,7 +89,7 @@ class RegistrationService:
             try:
                 self._notify.step(job, "❌", f"فشل: {msg}")
             except Exception as notify_exc:
-                log.error("CRITICAL: Could not notify user about failure: %s", notify_exc)
+                log.error("CRITICAL: Could not notify user: %s", notify_exc)
 
     def _handle_otp(self, job: Job) -> None:
         self._jobs.transition(job.job_id, JobStatus.WAITING_FOR_OTP)
@@ -110,7 +116,7 @@ class RegistrationService:
             except Exception as exc:
                 log.warning("Link open failed: %s", exc)
 
-        self._finish(job, f"✅ تم التحقق — الرمز: {otp_value}")
+        self._finish(job, f"تم التحقق — الرمز: {otp_value}")
 
     def _finish(self, job: Job, detail: str) -> None:
         self._jobs.complete(job.job_id, detail)

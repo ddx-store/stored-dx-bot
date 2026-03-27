@@ -136,13 +136,12 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         log.info("Job submitted to scheduler: %s", job.job_id)
 
         await update.message.reply_text(
-            f"✅ *تم قبول الطلب*\n\n"
-            f"ID: `{job.job_id}`\n"
-            f"الموقع: `{site_url}`\n"
-            f"الإيميل: `{email}`\n\n"
+            f"✅ تم قبول الطلب\n\n"
+            f"ID: {job.job_id}\n"
+            f"الموقع: {site_url}\n"
+            f"الإيميل: {email}\n\n"
             "سأبلغك بالتقدم فور حدوثه 🔄\n"
             "⏱ الحد الأقصى: 60 ثانية",
-            parse_mode="Markdown",
         )
         log.info("Reply sent to user for job %s", job.job_id)
 
@@ -182,16 +181,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
-        site_info = f"\n  الموقع: `{job.site_url}`" if job.site_url else ""
+        site_info = f"\n  الموقع: {job.site_url}" if job.site_url else ""
         text = (
-            f"• ID: `{job.job_id}`\n"
-            f"  الإيميل: `{job.email}`{site_info}\n"
-            f"  الحالة: `{job.status.value}`\n"
-            f"  آخر تحديث: `{job.updated_at.strftime('%Y-%m-%d %H:%M UTC')}`\n"
+            f"• ID: {job.job_id}\n"
+            f"  الإيميل: {job.email}{site_info}\n"
+            f"  الحالة: {job.status.value}\n"
+            f"  آخر تحديث: {job.updated_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
             + (f"  خطأ: {job.error_msg}\n" if job.error_msg else "")
             + (f"  النتيجة: {job.final_result}\n" if job.final_result else "")
         )
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(text)
 
     except Exception as exc:
         log.error("cmd_status error: %s\n%s", exc, traceback.format_exc())
@@ -219,15 +218,15 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("لا توجد عمليات بعد.")
             return
 
-        lines = ["*آخر العمليات:*\n"]
+        lines = ["آخر العمليات:\n"]
         for j in jobs:
             site_info = f" | {j.site_url}" if j.site_url else ""
             lines.append(
-                f"• `{j.job_id}` — `{j.email}`{site_info}\n"
-                f"  الحالة: `{j.status.value}`"
+                f"• {j.job_id} — {j.email}{site_info}\n"
+                f"  الحالة: {j.status.value}"
                 + (f"\n  خطأ: {j.error_msg}" if j.error_msg else "")
             )
-        await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n\n".join(lines))
 
     except Exception as exc:
         log.error("cmd_jobs error: %s\n%s", exc, traceback.format_exc())
