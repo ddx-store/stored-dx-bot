@@ -7,6 +7,8 @@ handlers.py and commands.py.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Optional
 
 from telegram import Bot
@@ -18,11 +20,12 @@ from app.core.logger import get_logger
 log = get_logger(__name__)
 
 _app: Optional[Application] = None
+_main_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def build_application() -> Application:
     """Build and return the PTB Application (call once at startup)."""
-    global _app
+    global _app, _main_loop
     if _app is not None:
         return _app
     _app = (
@@ -31,6 +34,12 @@ def build_application() -> Application:
         .build()
     )
     return _app
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Store the main thread's event loop so worker threads can schedule coroutines."""
+    global _main_loop
+    _main_loop = loop
 
 
 def get_bot() -> Bot:
@@ -42,24 +51,28 @@ def get_bot() -> Bot:
 
 def send_message(chat_id: int, text: str) -> None:
     """
-    Synchronously send a text message to *chat_id*.
-
-    Only use this outside of an async context (e.g., from a worker thread).
-    Inside async handlers, use context.bot.send_message directly.
+    Send a text message to *chat_id* from any thread (sync or async).
+    Uses run_coroutine_threadsafe to push into the main PTB event loop.
     """
-    import asyncio
     bot = get_bot()
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Schedule coroutine from a sync context.
-            asyncio.run_coroutine_threadsafe(
-                bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown"),
-                loop,
-            ).result(timeout=10)
-        else:
-            loop.run_until_complete(
-                bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-            )
-    except Exception as exc:
-        log.error("Failed to send Telegram message to %d: %s", chat_id, exc)
+
+    coro = bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+
+    loop = _main_loop
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+    if loop is not None and loop.is_running():
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            future.result(timeout=15)
+        except Exception as exc:
+            log.error("Failed to send Telegram message to %d: %s", chat_id, exc)
+    else:
+        try:
+            asyncio.run(coro)
+        except Exception as exc:
+            log.error("Failed to send Telegram message to %d: %s", chat_id, exc)

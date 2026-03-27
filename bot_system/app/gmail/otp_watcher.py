@@ -8,6 +8,7 @@ OTP_TIMEOUT_SECONDS deadline is reached.
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -35,10 +36,6 @@ class OtpWatcher:
         self._otp_repo = OtpMessageRepository(self._conn)
         self._label_id: Optional[str] = None
         self._connected = False
-
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
 
     def wait_for_otp(self, job: Job) -> OtpMessage:
         """
@@ -72,10 +69,6 @@ class OtpWatcher:
             f"OTP not received within {config.OTP_TIMEOUT_SECONDS}s for job {job.job_id}"
         )
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
-
     def _ensure_connected(self) -> None:
         if not self._connected:
             try:
@@ -99,7 +92,6 @@ class OtpWatcher:
             )
         except (GmailAPIError, Exception) as exc:
             log.error("Gmail list_messages failed: %s", exc)
-            # Try to reconnect on next poll
             self._connected = False
             try:
                 self._gmail.connect()
@@ -115,28 +107,26 @@ class OtpWatcher:
         candidates: list[OtpMessage] = []
 
         for stub in stubs:
-            msg_id = stub["id"]
-            # Use label+id as unique key to avoid re-processing
-            unique_key = f"{self._label_id}:{msg_id}"
+            raw_msg_id = stub["id"]
+            unique_key = f"{self._label_id}:{raw_msg_id}"
             if self._otp_repo.is_processed(unique_key):
                 continue
 
             try:
-                full = self._gmail.get_message(msg_id)
+                full = self._gmail.get_message(raw_msg_id)
             except Exception as exc:
-                log.warning("Could not fetch message %s: %s", msg_id, exc)
+                log.warning("Could not fetch message %s: %s", raw_msg_id, exc)
                 continue
 
             headers = self._gmail.extract_headers(full)
             body = self._gmail.extract_body_text(full)
 
             if not body:
-                log.debug("Empty body for message %s — skipping", msg_id)
+                log.debug("Empty body for message %s — skipping", raw_msg_id)
                 continue
 
             otp_code, otp_type, link = extract_otp(body)
 
-            # Parse timestamp
             internal_ms = int(full.get("internalDate", 0))
             received_at: Optional[datetime] = None
             if internal_ms:
@@ -144,10 +134,7 @@ class OtpWatcher:
                     internal_ms / 1000, tz=timezone.utc
                 )
 
-            # Determine recipient: prefer To header, fall back to job email
             to_header = headers.get("to", "")
-            # Extract bare email from "Name <email>" format
-            import re
             rcpt_match = re.search(r"[\w.+\-]+@[\w.\-]+", to_header)
             recipient = rcpt_match.group(0) if rcpt_match else job.email
 
@@ -170,7 +157,11 @@ class OtpWatcher:
         match = match_otp_message(job, candidates)
         if match:
             self._otp_repo.mark_processed(match.gmail_message_id, job.job_id)
-            self._gmail.mark_as_read(msg_id)
+            actual_msg_id = match.gmail_message_id.split(":", 1)[-1] if ":" in match.gmail_message_id else match.gmail_message_id
+            try:
+                self._gmail.mark_as_read(actual_msg_id)
+            except Exception as exc:
+                log.warning("Could not mark message as read: %s", exc)
             return match
 
         return None

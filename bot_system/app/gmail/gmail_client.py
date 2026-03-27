@@ -56,10 +56,8 @@ class GmailClient:
         self._password = app_password or config.GMAIL_APP_PASSWORD
         self._label = label or config.GMAIL_OTP_LABEL
         self._imap: Optional[imaplib.IMAP4_SSL] = None
-
-    # ------------------------------------------------------------------ #
-    # Connection
-    # ------------------------------------------------------------------ #
+        self._current_folder: Optional[str] = None
+        self._folder_readonly: bool = True
 
     def connect(self) -> None:
         """Open IMAP connection and login."""
@@ -80,34 +78,47 @@ class GmailClient:
             except Exception:
                 pass
             self._imap = None
+            self._current_folder = None
 
     def _ensure_connected(self) -> imaplib.IMAP4_SSL:
         if self._imap is None:
             self.connect()
-        # Re-check connection is alive (NOOP)
         try:
             self._imap.noop()
         except Exception:
             log.debug("IMAP connection lost — reconnecting")
             self._imap = None
+            self._current_folder = None
             self.connect()
         return self._imap
 
-    # ------------------------------------------------------------------ #
-    # Public helpers used by OtpWatcher
-    # ------------------------------------------------------------------ #
+    def _select_folder(self, folder: str, readonly: bool = False) -> bool:
+        """Select an IMAP folder. Returns True if successful."""
+        imap = self._ensure_connected()
+        for folder_name in [folder, f"[Gmail]/{folder}", f"INBOX"]:
+            try:
+                typ, _ = imap.select(f'"{folder_name}"', readonly=readonly)
+                if typ == "OK":
+                    self._current_folder = folder_name
+                    self._folder_readonly = readonly
+                    return True
+            except Exception:
+                continue
+        log.warning("Could not select folder %r — falling back to INBOX", folder)
+        typ, _ = imap.select("INBOX", readonly=readonly)
+        if typ == "OK":
+            self._current_folder = "INBOX"
+            self._folder_readonly = readonly
+            return True
+        return False
 
     def authenticate(self) -> None:
-        """Alias for connect() — keeps the same interface as before."""
+        """Alias for connect()."""
         self.connect()
 
     def get_label_id(self, label_name: str) -> Optional[str]:
-        """For IMAP the 'label' is a mailbox folder name — just return it."""
+        """For IMAP the 'label' is a folder name."""
         return label_name
-
-    # ------------------------------------------------------------------ #
-    # Message listing
-    # ------------------------------------------------------------------ #
 
     def list_messages(
         self,
@@ -117,26 +128,15 @@ class GmailClient:
     ) -> List[Dict[str, str]]:
         """
         Return a list of message stubs: [{"id": uid_string}, ...].
-        *label_id* is the Gmail label / IMAP folder name.
-        *query*    can be a 'to:email' string — parsed to IMAP SEARCH criteria.
+        Opens the folder in read-write mode so we can later mark_as_read.
         """
-        imap = self._ensure_connected()
         folder = label_id or self._label or "INBOX"
+        self._select_folder(folder, readonly=False)
 
-        # Select folder (Gmail labels appear as folders in IMAP).
-        # Try with and without [Gmail]/ prefix.
-        for folder_name in [folder, f"[Gmail]/{folder}", f"{folder}"]:
-            typ, _ = imap.select(f'"{folder_name}"', readonly=True)
-            if typ == "OK":
-                break
-        else:
-            log.warning("Could not select label folder %r — falling back to INBOX", folder)
-            imap.select("INBOX", readonly=True)
+        imap = self._ensure_connected()
 
-        # Build IMAP search criteria.
         criteria = "ALL"
         if query:
-            # Extract email address from "to:addr@example.com"
             m = re.search(r"to:(\S+)", query, re.IGNORECASE)
             if m:
                 to_addr = m.group(1)
@@ -147,19 +147,12 @@ class GmailClient:
             return []
 
         uid_list = data[0].split()
-        # Most recent first, limit results.
         uid_list = uid_list[-max_results:][::-1]
         return [{"id": uid.decode()} for uid in uid_list]
 
-    # ------------------------------------------------------------------ #
-    # Message fetching
-    # ------------------------------------------------------------------ #
-
     def get_message(self, message_id: str) -> Dict[str, Any]:
         """
-        Fetch a message by IMAP sequence number and return a dict compatible
-        with the existing code:
-          {"payload": {"headers": [...], "parts": [...]}, "internalDate": ms}
+        Fetch a message by IMAP sequence number and return a dict.
         """
         imap = self._ensure_connected()
         typ, data = imap.fetch(message_id, "(RFC822)")
@@ -172,7 +165,6 @@ class GmailClient:
         else:
             msg = email.message_from_string(str(raw))
 
-        # Parse date → milliseconds since epoch.
         date_str = msg.get("Date", "")
         internal_ms = 0
         if date_str:
@@ -196,10 +188,6 @@ class GmailClient:
             "internalDate": str(internal_ms),
         }
 
-    # ------------------------------------------------------------------ #
-    # Header / body extraction — same API as before
-    # ------------------------------------------------------------------ #
-
     @staticmethod
     def extract_headers(message: Dict[str, Any]) -> Dict[str, str]:
         headers: Dict[str, str] = {}
@@ -222,7 +210,6 @@ class GmailClient:
                         if payload:
                             charset = part.get_content_charset() or "utf-8"
                             return payload.decode(charset, errors="replace")
-                # Fallback: try HTML
                 for part in msg.walk():
                     ct = part.get_content_type()
                     if ct == "text/html":
@@ -230,7 +217,6 @@ class GmailClient:
                         if payload:
                             charset = part.get_content_charset() or "utf-8"
                             text = payload.decode(charset, errors="replace")
-                            # Strip basic HTML tags
                             return re.sub(r"<[^>]+>", " ", text)
                 return None
             else:
@@ -242,13 +228,14 @@ class GmailClient:
 
         return _get_text(raw_msg) or ""
 
-    # ------------------------------------------------------------------ #
-    # Mutation
-    # ------------------------------------------------------------------ #
-
     def mark_as_read(self, message_id: str) -> None:
         """Mark an IMAP message as Seen."""
         imap = self._ensure_connected()
+        if self._folder_readonly:
+            log.debug("Folder is readonly, re-selecting for write")
+            if self._current_folder:
+                imap.select(f'"{self._current_folder}"', readonly=False)
+                self._folder_readonly = False
         try:
             imap.store(message_id, "+FLAGS", "\\Seen")
         except Exception as exc:

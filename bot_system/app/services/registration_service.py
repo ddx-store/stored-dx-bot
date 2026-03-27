@@ -9,6 +9,7 @@ drive async Playwright calls inside that thread.
 from __future__ import annotations
 
 import asyncio
+import traceback
 
 from app.core.config import config
 from app.core.enums import JobStatus
@@ -36,17 +37,13 @@ class RegistrationService:
         self._results = ResultRepository()
         self._browser = PlaywrightClient(timeout=30_000)
 
-    # ------------------------------------------------------------------ #
-    # Public entry point (called from background thread by Scheduler)
-    # ------------------------------------------------------------------ #
-
     def run_job(self, job: Job, password: str) -> None:
         """
         Execute the full registration flow for *job*.
         Safe to call in a background thread.
         """
         log.info(
-            "Starting registration flow: job=%s email=%s site=%s",
+            "Starting registration: job=%s email=%s site=%s",
             job.job_id, job.email, job.site_url,
         )
 
@@ -54,48 +51,41 @@ class RegistrationService:
             self._jobs.transition(job.job_id, JobStatus.CREATING_ACCOUNT)
             self._notify.job_started(job)
 
-            # ── Step 1: Open the site and fill registration form ──────────
             if not job.site_url:
                 raise RuntimeError(
-                    "No site URL provided. Use: /create site.com email@example.com"
+                    "لم يتم تحديد رابط الموقع. الاستخدام: /create site.com email@example.com"
                 )
 
-            reg_result: RegistrationResult = asyncio.run(
-                self._browser.register(
-                    site_url=job.site_url,
-                    email=job.email,
-                    password=password,
+            log.info("Launching Playwright for %s ...", job.site_url)
+            loop = asyncio.new_event_loop()
+            try:
+                reg_result: RegistrationResult = loop.run_until_complete(
+                    self._browser.register(
+                        site_url=job.site_url,
+                        email=job.email,
+                        password=password,
+                    )
                 )
+            finally:
+                loop.close()
+
+            log.info(
+                "Playwright result for job=%s: success=%s needs_otp=%s msg=%s",
+                job.job_id, reg_result.success, reg_result.needs_otp, reg_result.message,
             )
 
             if not reg_result.success:
-                raise RuntimeError(f"Registration failed: {reg_result.message}")
+                raise RuntimeError(f"فشل التسجيل: {reg_result.message}")
 
-            log.info("Registration submitted for job=%s: %s", job.job_id, reg_result.message)
-
-            # ── Step 2: If OTP is needed, wait for it via Gmail ───────────
-            if reg_result.needs_otp or self._site_might_send_otp(job):
+            if reg_result.needs_otp and config.GMAIL_USER and config.GMAIL_APP_PASSWORD:
                 self._step_wait_for_otp(job)
             else:
-                # No OTP needed — mark complete
                 self._finish(job, reg_result.message)
 
         except Exception as exc:
-            log.exception("Unhandled exception in job %s: %s", job.job_id, exc)
+            log.error("Job %s failed: %s\n%s", job.job_id, exc, traceback.format_exc())
             self._jobs.fail(job.job_id, str(exc))
             self._notify.job_failed(job, str(exc))
-
-    # ------------------------------------------------------------------ #
-    # Internal steps
-    # ------------------------------------------------------------------ #
-
-    def _site_might_send_otp(self, job: Job) -> bool:
-        """
-        Heuristic: if Gmail credentials are configured, we can
-        attempt to wait for an OTP even if the browser didn't detect one.
-        This handles sites that redirect before the OTP page is shown.
-        """
-        return bool(config.GMAIL_USER and config.GMAIL_APP_PASSWORD)
 
     def _step_wait_for_otp(self, job: Job) -> None:
         self._jobs.transition(job.job_id, JobStatus.WAITING_FOR_OTP)
@@ -104,12 +94,10 @@ class RegistrationService:
         try:
             otp_msg = self._watcher.wait_for_otp(job)
         except OtpTimeout as exc:
-            # OTP timed out — still mark job done (form was submitted)
-            log.warning("OTP timeout for job=%s — treating as complete: %s", job.job_id, exc)
-            self._finish(job, "تم إرسال النموذج، لم يصل رمز التحقق (انتهى الوقت).")
+            log.warning("OTP timeout for job=%s: %s", job.job_id, exc)
+            self._finish(job, "تم إرسال النموذج. لم يصل رمز التحقق (انتهى الوقت).")
             return
 
-        # Determine OTP value
         if otp_msg.link_value:
             otp_value = otp_msg.link_value
             log.info("OTP is an activation link for job=%s", job.job_id)
@@ -123,7 +111,6 @@ class RegistrationService:
         self._notify.otp_received(job)
         log.info("OTP for job=%s: %s", job.job_id, otp_value)
 
-        # If it's a link, open it directly
         if otp_msg.link_value and otp_msg.link_value.startswith("http"):
             try:
                 import urllib.request
@@ -137,5 +124,6 @@ class RegistrationService:
     def _finish(self, job: Job, detail: str) -> None:
         self._jobs.complete(job.job_id, detail)
         self._results.save(Result(job_id=job.job_id, success=True, detail=detail))
+        job.final_result = detail
         self._notify.job_succeeded(job)
         log.info("Job %s completed: %s", job.job_id, detail)
