@@ -100,6 +100,8 @@ class PaymentClient:
         card_cvv: str,
         card_holder: str,
         plan_name: str = "",
+        billing_zip: str = "",
+        billing_country: str = "US",
         progress_callback: Optional[Callable] = None,
     ) -> PaymentResult:
         self._progress_callback = progress_callback
@@ -156,6 +158,7 @@ class PaymentClient:
                     page, site_url, email, password,
                     card_number, card_expiry_month, card_expiry_year,
                     card_cvv, card_holder, plan_name,
+                    billing_zip, billing_country,
                 ),
                 timeout=PAYMENT_TIMEOUT,
             )
@@ -182,8 +185,20 @@ class PaymentClient:
         self, page, site_url, email, password,
         card_number, card_expiry_month, card_expiry_year,
         card_cvv, card_holder, plan_name,
+        billing_zip="", billing_country="US",
     ) -> PaymentResult:
         domain = urlparse(site_url).netloc.replace("www.", "")
+
+        api_responses = []
+
+        def _on_response(r):
+            try:
+                if r.request.method == "POST":
+                    api_responses.append((r.status, r.url, r.request.method))
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
 
         self._report("فتح الموقع...")
         login_result = await self._login(page, site_url, domain, email, password)
@@ -193,17 +208,19 @@ class PaymentClient:
         self._report("البحث عن صفحة الاشتراك...")
         upgrade_found = await self._navigate_to_upgrade(page, domain, plan_name)
         if not upgrade_found:
-            return PaymentResult(False, message="لم أجد صفحة الاشتراك/الترقية")
+            return PaymentResult(False, message="لم أجد صفحة الاشتراك/الترقية -- تأكد من رابط الموقع أو الخطة المختارة")
 
         self._report("البحث عن نموذج الدفع...")
         payment_form = await self._find_payment_form(page)
         if not payment_form:
-            return PaymentResult(False, message="لم أجد نموذج الدفع")
+            return PaymentResult(False, message="لم أجد نموذج الدفع -- قد يطلب الموقع خطوات يدوية")
 
         self._report("تعبئة بيانات البطاقة...")
+        api_responses.clear()
+        before_url = page.url
         filled = await self._fill_card(
             page, card_number, card_expiry_month, card_expiry_year,
-            card_cvv, card_holder,
+            card_cvv, card_holder, billing_zip, billing_country,
         )
         if not filled:
             return PaymentResult(False, message="فشل تعبئة بيانات البطاقة")
@@ -211,11 +228,19 @@ class PaymentClient:
         self._report("تأكيد الدفع...")
         confirmed = await self._confirm_payment(page)
         if not confirmed:
-            return PaymentResult(False, message="فشل تأكيد الدفع")
+            return PaymentResult(False, message="فشل تأكيد الدفع -- لم أجد زر الدفع")
 
         self._report("التحقق من نتيجة الدفع...")
         await asyncio.sleep(3)
-        success = await self._check_payment_result(page)
+
+        if await self._detect_3ds(page):
+            return PaymentResult(
+                False,
+                message="البنك يطلب تحقق إضافي (3D Secure) -- يجب إتمامه يدوياً عبر تطبيق البنك أو SMS",
+                page_url=page.url,
+            )
+
+        success = await self._check_payment_result(page, api_responses, before_url)
 
         if success:
             return PaymentResult(True, message="تم الدفع والاشتراك بنجاح", page_url=page.url)
@@ -225,11 +250,18 @@ class PaymentClient:
                 body = (await page.inner_text("body"))[:500].lower()
             except Exception:
                 pass
-            error_hints = ["declined", "insufficient", "invalid", "expired", "مرفوض", "غير صالح", "failed"]
-            for hint in error_hints:
+            error_hints = [
+                ("declined", "البطاقة مرفوضة من البنك"),
+                ("insufficient", "رصيد غير كافٍ"),
+                ("invalid", "بيانات البطاقة غير صحيحة"),
+                ("expired", "البطاقة منتهية الصلاحية"),
+                ("مرفوض", "البطاقة مرفوضة"),
+                ("failed", "فشلت عملية الدفع"),
+            ]
+            for hint, arabic_msg in error_hints:
                 if hint in body:
-                    return PaymentResult(False, message=f"البطاقة مرفوضة أو غير صالحة: {hint}")
-            return PaymentResult(False, message="لم أتأكد من نجاح الدفع -- تحقق يدويا")
+                    return PaymentResult(False, message=arabic_msg)
+            return PaymentResult(False, message="لم أتأكد من نجاح الدفع -- تحقق يدوياً من حسابك")
 
     async def _login(self, page, site_url, domain, email, password) -> bool:
         login_url = _LOGIN_URLS.get(domain, site_url)
@@ -313,14 +345,17 @@ class PaymentClient:
 
     async def _navigate_to_upgrade(self, page, domain, plan_name) -> bool:
         upgrade_url = _UPGRADE_URLS.get(domain)
+        nav_ok = False
         if upgrade_url:
             try:
                 await page.goto(upgrade_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
                 await self._wait_spa(page)
+                nav_ok = True
                 log.info("Navigated to upgrade URL: %s", upgrade_url)
             except Exception:
                 log.warning("Direct upgrade URL failed, trying buttons")
 
+        clicked_upgrade = False
         for text in _UPGRADE_BUTTON_TEXTS:
             try:
                 btn = page.get_by_text(text, exact=False).first
@@ -329,6 +364,7 @@ class PaymentClient:
                     await asyncio.sleep(1.5)
                     await self._wait_spa(page)
                     log.info("Clicked upgrade button: %s", text)
+                    clicked_upgrade = True
                     break
             except Exception:
                 continue
@@ -346,6 +382,28 @@ class PaymentClient:
                         break
                 except Exception:
                     continue
+
+        body_check = ""
+        try:
+            body_check = (await page.inner_text("body"))[:3000].lower()
+        except Exception:
+            pass
+
+        pricing_indicators = [
+            "per month", "per year", "/month", "/year", "monthly", "annually",
+            "subscribe", "upgrade", "credit card", "payment", "billing",
+            "checkout", "pricing", "plan", "اشتراك شهري", "اشتراك سنوي",
+            "ادفع", "بطاقة", "ترقية",
+        ]
+        found_pricing = any(ind in body_check for ind in pricing_indicators)
+
+        if not found_pricing and not nav_ok and not clicked_upgrade:
+            log.warning("No pricing indicators found on page: %s", page.url[:120])
+            return False
+
+        if not found_pricing and not clicked_upgrade:
+            log.warning("Navigated but no pricing content detected: %s", page.url[:120])
+            return False
 
         return True
 
@@ -381,14 +439,19 @@ class PaymentClient:
         self, page,
         card_number, expiry_month, expiry_year,
         cvv, holder_name,
+        billing_zip="", billing_country="US",
     ) -> bool:
         expiry = f"{expiry_month}/{expiry_year}"
 
+        if await self._fill_stripe_elements_separate(page, card_number, expiry, cvv, holder_name, billing_zip, billing_country):
+            log.info("Filled card via Stripe Elements (separate iframes)")
+            return True
+
         stripe_frame = await self._find_stripe_iframe(page)
         if stripe_frame:
-            return await self._fill_stripe(stripe_frame, page, card_number, expiry, cvv, holder_name)
+            return await self._fill_stripe(stripe_frame, page, card_number, expiry, cvv, holder_name, billing_zip, billing_country)
 
-        return await self._fill_direct_card(page, card_number, expiry_month, expiry_year, cvv, holder_name)
+        return await self._fill_direct_card(page, card_number, expiry_month, expiry_year, cvv, holder_name, billing_zip, billing_country)
 
     async def _find_stripe_iframe(self, page):
         try:
@@ -410,7 +473,9 @@ class PaymentClient:
             log.debug("Stripe iframe search: %s", exc)
         return None
 
-    async def _fill_stripe(self, card_frame, page, card_number, expiry, cvv, holder_name) -> bool:
+    async def _fill_stripe(self, card_frame, page, card_number, expiry, cvv, holder_name, billing_zip="", billing_country="US") -> bool:
+        zip_to_use = billing_zip or "10001"
+
         try:
             card_input = card_frame.locator('input[name="cardnumber"], input[autocomplete="cc-number"], input[data-elements-stable-field-name="cardNumber"]').first
             if await card_input.is_visible(timeout=3000):
@@ -442,7 +507,7 @@ class PaymentClient:
         try:
             zip_input = card_frame.locator('input[name="postal"], input[autocomplete="postal-code"]').first
             if await zip_input.is_visible(timeout=1000):
-                await zip_input.fill("10001")
+                await zip_input.fill(zip_to_use)
         except Exception:
             pass
 
@@ -452,18 +517,20 @@ class PaymentClient:
 
         zip_on_page = await self._find_input(page, ["postal", "zip", "zipcode"])
         if zip_on_page:
-            await self._fill_input(zip_on_page, "10001")
+            await self._fill_input(zip_on_page, zip_to_use)
 
         country_select = page.locator('select[name*="country"], select[id*="country"]').first
         try:
             if await country_select.is_visible(timeout=1000):
-                await country_select.select_option(value="US")
+                await country_select.select_option(value=billing_country)
         except Exception:
             pass
 
         return True
 
-    async def _fill_direct_card(self, page, card_number, exp_month, exp_year, cvv, holder_name) -> bool:
+    async def _fill_direct_card(self, page, card_number, exp_month, exp_year, cvv, holder_name, billing_zip="", billing_country="US") -> bool:
+        zip_to_use = billing_zip or "10001"
+
         card_input = await self._find_input(page, [
             "card", "cardnumber", "cc-number", "card-number", "cardNumber", "number",
         ])
@@ -493,7 +560,14 @@ class PaymentClient:
 
         zip_input = await self._find_input(page, ["postal", "zip", "zipcode"])
         if zip_input:
-            await self._fill_input(zip_input, "10001")
+            await self._fill_input(zip_input, zip_to_use)
+
+        country_select = page.locator('select[name*="country"], select[id*="country"]').first
+        try:
+            if await country_select.is_visible(timeout=1000):
+                await country_select.select_option(value=billing_country)
+        except Exception:
+            pass
 
         return True
 
@@ -530,9 +604,27 @@ class PaymentClient:
 
         return False
 
-    async def _check_payment_result(self, page) -> bool:
+    async def _check_payment_result(self, page, api_responses=None, before_url="") -> bool:
         await self._wait_spa(page)
         await asyncio.sleep(2)
+
+        current_url = page.url.lower()
+        success_url_patterns = [
+            "success", "confirm", "thank", "complete", "receipt",
+            "subscrib", "welcome", "activated", "payment-done", "checkout/complete",
+        ]
+        if any(p in current_url for p in success_url_patterns):
+            log.info("Payment success detected via URL: %s", current_url[:120])
+            return True
+
+        if api_responses:
+            payment_api_paths = ["pay", "subscribe", "checkout", "purchase", "order", "billing", "charge"]
+            for status, url, method in api_responses:
+                if method == "POST" and 200 <= status < 300:
+                    url_path = urlparse(url).path.lower()
+                    if any(p in url_path for p in payment_api_paths):
+                        log.info("Payment success detected via API: %s %s", status, url[:120])
+                        return True
 
         body = ""
         try:
@@ -540,24 +632,134 @@ class PaymentClient:
         except Exception:
             pass
 
-        success_kw = [
-            "thank you", "success", "welcome", "subscribed",
-            "payment complete", "order confirmed", "activated",
-            "شكرا", "نجح", "تم الاشتراك", "مفعل",
-            "you're all set", "enjoy", "receipt",
-        ]
         fail_kw = [
             "declined", "failed", "error", "invalid card",
             "insufficient", "expired", "مرفوض", "فشل",
+            "your card was", "card number is incorrect",
         ]
-
         for kw in fail_kw:
             if kw in body:
                 return False
 
+        success_kw = [
+            "thank you", "payment successful", "payment complete", "order confirmed",
+            "subscribed", "activated", "you're all set", "enjoy your",
+            "receipt", "transaction id", "confirmation number", "invoice",
+            "شكرا لك", "نجح", "تم الاشتراك", "مفعل", "تم الدفع",
+        ]
         for kw in success_kw:
             if kw in body:
                 return True
+
+        return False
+
+    async def _detect_3ds(self, page) -> bool:
+        body = ""
+        try:
+            body = (await page.inner_text("body"))[:3000].lower()
+        except Exception:
+            return False
+
+        three_ds_kw = [
+            "3d secure", "3ds", "authentication required", "verify your identity",
+            "secure authentication", "bank authentication",
+            "enter the code from your bank", "one-time password",
+            "bank code", "authentication code", "verify your card",
+        ]
+        if any(kw in body for kw in three_ds_kw):
+            log.info("3DS detected via page content")
+            return True
+
+        try:
+            iframes = await page.query_selector_all("iframe")
+            for iframe in iframes:
+                src = (await iframe.get_attribute("src") or "").lower()
+                name = (await iframe.get_attribute("name") or "").lower()
+                if any(k in src + name for k in ["3ds", "acs", "challenge", "authenticate", "cardinal"]):
+                    log.info("3DS detected via iframe: %s", src[:80])
+                    return True
+        except Exception:
+            pass
+
+        return False
+
+    async def _fill_stripe_elements_separate(self, page, card_number, expiry, cvv, holder_name, billing_zip="", billing_country="US") -> bool:
+        zip_to_use = billing_zip or "10001"
+        filled = 0
+
+        for frame in page.frames:
+            url = frame.url or ""
+            name = frame.name or ""
+            if "stripe" not in url.lower() and "stripe" not in name.lower():
+                continue
+
+            try:
+                card_input = frame.locator(
+                    '[name="cardnumber"], [autocomplete="cc-number"], '
+                    '[data-elements-stable-field-name="cardNumber"]'
+                ).first
+                if await card_input.is_visible(timeout=800):
+                    await card_input.click()
+                    await card_input.fill(card_number)
+                    await asyncio.sleep(0.2)
+                    filled += 1
+                    continue
+            except Exception:
+                pass
+
+            try:
+                exp_input = frame.locator(
+                    '[name="exp-date"], [autocomplete="cc-exp"], '
+                    '[data-elements-stable-field-name="cardExpiry"]'
+                ).first
+                if await exp_input.is_visible(timeout=800):
+                    await exp_input.click()
+                    await exp_input.fill(expiry)
+                    await asyncio.sleep(0.2)
+                    filled += 1
+                    continue
+            except Exception:
+                pass
+
+            try:
+                cvv_input = frame.locator(
+                    '[name="cvc"], [autocomplete="cc-csc"], '
+                    '[data-elements-stable-field-name="cardCvc"]'
+                ).first
+                if await cvv_input.is_visible(timeout=800):
+                    await cvv_input.click()
+                    await cvv_input.fill(cvv)
+                    await asyncio.sleep(0.2)
+                    filled += 1
+                    continue
+            except Exception:
+                pass
+
+            try:
+                zip_input = frame.locator('[name="postal"], [autocomplete="postal-code"]').first
+                if await zip_input.is_visible(timeout=500):
+                    await zip_input.fill(zip_to_use)
+                    filled += 1
+            except Exception:
+                pass
+
+        if filled >= 2:
+            name_input = await self._find_input(page, ["cardholder", "card-holder", "name", "billing"])
+            if name_input:
+                await self._fill_input(name_input, holder_name)
+
+            zip_on_page = await self._find_input(page, ["postal", "zip", "zipcode"])
+            if zip_on_page:
+                await self._fill_input(zip_on_page, zip_to_use)
+
+            country_select = page.locator('select[name*="country"], select[id*="country"]').first
+            try:
+                if await country_select.is_visible(timeout=1000):
+                    await country_select.select_option(value=billing_country)
+            except Exception:
+                pass
+
+            return True
 
         return False
 

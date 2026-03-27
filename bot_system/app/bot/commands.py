@@ -30,6 +30,34 @@ PAYMENT_SITES = [
     {"label": "Replit", "url": "replit.com", "icon": "💻"},
 ]
 
+SITE_PLANS = {
+    "chatgpt.com": [
+        {"label": "Plus — $20/شهر", "value": "plus"},
+        {"label": "Team — $25/شهر", "value": "team"},
+    ],
+    "canva.com": [
+        {"label": "Pro — $15/شهر", "value": "pro"},
+        {"label": "Teams — $10/شهر", "value": "teams"},
+    ],
+    "protonvpn.com": [
+        {"label": "Plus — $10/شهر", "value": "plus"},
+        {"label": "Unlimited — $12/شهر", "value": "unlimited"},
+    ],
+    "pixlr.com": [
+        {"label": "Plus — $5/شهر", "value": "plus"},
+        {"label": "Premium — $13/شهر", "value": "premium"},
+    ],
+    "replit.com": [
+        {"label": "Core — $15/شهر", "value": "core"},
+        {"label": "Teams — $20/شهر", "value": "teams"},
+    ],
+}
+
+BILLING_COUNTRIES = [
+    ("🇸🇦 SA", "SA"), ("🇺🇸 US", "US"), ("🇬🇧 GB", "GB"),
+    ("🇦🇪 AE", "AE"), ("🇩🇪 DE", "DE"), ("🇫🇷 FR", "FR"),
+]
+
 _pending_site = {}
 _pending_payment = {}
 
@@ -111,6 +139,29 @@ def _build_payment_sites_menu():
         keyboard.append(row)
     keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="pay:custom")])
     keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:home")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _build_plan_menu(site_url: str, back_data: str = "back:paysites"):
+    plans = SITE_PLANS.get(site_url, [])
+    keyboard = []
+    for plan in plans:
+        keyboard.append([InlineKeyboardButton(plan["label"], callback_data=f"plan:{plan['value']}")])
+    keyboard.append([InlineKeyboardButton("📋 خطة أخرى (أدخل يدوياً)", callback_data="plan:custom")])
+    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data=back_data)])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _build_country_menu():
+    keyboard = []
+    row = []
+    for label, code in BILLING_COUNTRIES:
+        row.append(InlineKeyboardButton(label, callback_data=f"country:{code}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -333,15 +384,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if ps["url"] == site_url:
                 site_label = f"{ps['icon']} {ps['label']}"
                 break
-        _pending_payment[user_id] = {"step": "email", "site_url": site_url, "label": site_label}
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+        _pending_payment[user_id] = {"step": "plan", "site_url": site_url, "label": site_label}
         await query.edit_message_text(
             "╔══════════════════════════════╗\n"
             f"║  🔄  إعادة - {site_label}\n"
             "╚══════════════════════════════╝\n"
             "\n"
-            "  📧 ارسل الايميل (حساب الموقع):\n",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "  📋 اختر الخطة:\n",
+            reply_markup=_build_plan_menu(site_url),
         )
         return
 
@@ -353,15 +403,66 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 site_label = f"{ps['icon']} {ps['label']}"
                 break
 
-        _pending_payment[user_id] = {"step": "email", "site_url": site_val, "label": site_label}
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+        _pending_payment[user_id] = {"step": "plan", "site_url": site_val, "label": site_label}
         await query.edit_message_text(
             "╔══════════════════════════════╗\n"
             f"║  💳  {site_label}\n"
             "╚══════════════════════════════╝\n"
             "\n"
+            "  📋 اختر الخطة:\n",
+            reply_markup=_build_plan_menu(site_val),
+        )
+        return
+
+    if data.startswith("plan:"):
+        payment = _pending_payment.get(user_id)
+        if not payment:
+            await query.edit_message_text("انتهت الجلسة، ابدأ من جديد /start")
+            return
+        plan_val = data[5:]
+        if plan_val == "custom":
+            payment["step"] = "plan_custom"
+            keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+            await query.edit_message_text(
+                "╔══════════════════════════════╗\n"
+                "║  📋  اسم الخطة               ║\n"
+                "╚══════════════════════════════╝\n"
+                "\n"
+                "  ارسل اسم الخطة (مثال: pro، plus، premium):\n",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+        payment["plan"] = plan_val
+        payment["step"] = "email"
+        site_label = payment.get("label", payment.get("site_url", ""))
+        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            f"║  💳  {site_label}\n"
+            "╚══════════════════════════════╝\n"
+            f"  ✅  الخطة: {plan_val}\n"
+            "\n"
             "  📧 ارسل الايميل (حساب الموقع):\n",
             reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("country:"):
+        payment = _pending_payment.get(user_id)
+        if not payment or payment.get("step") != "country":
+            await query.edit_message_text("انتهت الجلسة، ابدأ من جديد /start")
+            return
+        country_code = data[8:]
+        payment["billing_country"] = country_code
+        payment["step"] = "billing_zip"
+        await query.edit_message_text(
+            "╔══════════════════════════════╗\n"
+            "║  💳  عنوان الفاتورة           ║\n"
+            "╚══════════════════════════════╝\n"
+            f"  ✅  الدولة: {country_code}\n"
+            "\n"
+            "  📮 ارسل الرمز البريدي (ZIP):\n"
+            "  مثال: 12345\n"
         )
         return
 
@@ -429,11 +530,37 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         raw = raw.rstrip("/.,;:!?")
         payment["site_url"] = raw
         payment["label"] = raw
+        payment["step"] = "plan"
+        plans = SITE_PLANS.get(raw, [])
+        if plans:
+            await update.message.reply_text(
+                "╔══════════════════════════════╗\n"
+                f"║  💳  {raw}\n"
+                "╚══════════════════════════════╝\n"
+                "\n"
+                "  📋 اختر الخطة:\n",
+                reply_markup=_build_plan_menu(raw),
+            )
+        else:
+            payment["step"] = "plan_custom"
+            await update.message.reply_text(
+                "╔══════════════════════════════╗\n"
+                f"║  💳  {raw}\n"
+                "╚══════════════════════════════╝\n"
+                "\n"
+                "  📋 ارسل اسم الخطة (مثال: pro, plus, premium)\n"
+                "  أو ارسل 0 إذا ما تعرف:\n"
+            )
+        return
+
+    if step == "plan_custom":
+        plan_val = text.strip()
+        if plan_val == "0":
+            plan_val = ""
+        payment["plan"] = plan_val
         payment["step"] = "email"
         await update.message.reply_text(
-            "╔══════════════════════════════╗\n"
-            f"║  💳  {raw}\n"
-            "╚══════════════════════════════╝\n"
+            f"  ✅  الخطة: {plan_val or 'افتراضية'}\n"
             "\n"
             "  📧 ارسل الايميل (حساب الموقع):\n"
         )
@@ -479,10 +606,10 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
         return
 
     if step == "card":
-        card_data = _parse_card(text)
+        card_data, card_error = _parse_card(text)
         if not card_data:
             await update.message.reply_text(
-                "  ❌ بيانات البطاقة غير صحيحة\n"
+                f"  ❌ {card_error or 'بيانات البطاقة غير صحيحة'}\n"
                 "\n"
                 "  ارسلها بهذا التنسيق:\n"
                 "  رقم البطاقة\n"
@@ -492,12 +619,38 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             )
             return
 
+        payment["card"] = card_data
+        payment["step"] = "country"
+        masked = f"****{card_data.number[-4:]}"
+        await update.message.reply_text(
+            f"  ✅  البطاقة مقبولة  {masked}\n"
+            "\n"
+            "  🌍 اختر دولة الفاتورة:\n",
+            reply_markup=_build_country_menu(),
+        )
+        return
+
+    if step == "billing_zip":
+        zip_code = re.sub(r"\s+", "", text.strip())
+        if not zip_code or not re.match(r"^[A-Z0-9\-]{3,10}$", zip_code, re.IGNORECASE):
+            await update.message.reply_text("  ❌ الرمز البريدي غير صحيح.\n  مثال: 12345 أو SW1A 1AA")
+            return
+
+        card_data = payment.get("card")
+        if not card_data:
+            await update.message.reply_text("حدث خطأ، ابدأ من جديد /start")
+            _pending_payment.pop(user_id, None)
+            return
+
+        card_data.billing_zip = zip_code.upper()
         _pending_payment.pop(user_id, None)
 
         masked = f"****{card_data.number[-4:]}"
+        country = card_data.billing_country
         await update.message.reply_text(
-            "  ✅  بيانات البطاقة مقبولة\n"
+            "  ✅  تم تأكيد بيانات الفاتورة\n"
             f"  💳  {masked}\n"
+            f"  🌍  {country} — {zip_code.upper()}\n"
             "\n"
             "  جاري بدء عملية التفعيل...\n"
         )
@@ -508,12 +661,14 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             email=payment["email"],
             password=payment["password"],
             card=card_data,
+            plan_name=payment.get("plan", ""),
         )
         return
 
 
 def _parse_card(text: str):
     from app.storage.models import CardInfo
+    from datetime import date
 
     lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
 
@@ -525,18 +680,18 @@ def _parse_card(text: str):
     else:
         parts = text.split()
         if len(parts) < 4:
-            return None
+            return None, "أرسل 4 أسطر: رقم البطاقة، تاريخ الانتهاء، CVV، الاسم"
         card_number = re.sub(r"[\s\-]", "", parts[0])
         expiry = parts[1]
         cvv = parts[2]
         holder = " ".join(parts[3:]).strip()
 
     if not re.match(r"^\d{13,19}$", card_number):
-        return None
+        return None, "رقم البطاقة غير صحيح (يجب أن يكون 13-19 رقم)"
 
     exp_match = re.match(r"^(\d{1,2})/(\d{2,4})$", expiry)
     if not exp_match:
-        return None
+        return None, "تاريخ الانتهاء غير صحيح (استخدم MM/YY مثال: 12/26)"
 
     month = exp_match.group(1).zfill(2)
     year = exp_match.group(2)
@@ -544,13 +699,18 @@ def _parse_card(text: str):
         year = year[2:]
 
     if not (1 <= int(month) <= 12):
-        return None
+        return None, "الشهر غير صحيح (يجب أن يكون بين 01 و 12)"
+
+    today = date.today()
+    full_year = 2000 + int(year)
+    if full_year < today.year or (full_year == today.year and int(month) < today.month):
+        return None, "البطاقة منتهية الصلاحية"
 
     if not re.match(r"^\d{3,4}$", cvv):
-        return None
+        return None, "CVV غير صحيح (3 أو 4 أرقام)"
 
     if not holder:
-        return None
+        return None, "اسم صاحب البطاقة مفقود"
 
     return CardInfo(
         number=card_number,
@@ -558,7 +718,7 @@ def _parse_card(text: str):
         expiry_year=year,
         cvv=cvv,
         holder_name=holder,
-    )
+    ), None
 
 
 async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -620,7 +780,7 @@ async def _start_job(update: Update, raw_site: str, email: str):
     log.info("Job submitted to scheduler: %s", job.job_id)
 
 
-async def _start_payment_job(update: Update, site_url: str, email: str, password: str, card):
+async def _start_payment_job(update: Update, site_url: str, email: str, password: str, card, plan_name: str = ""):
     from app.jobs.scheduler import scheduler
 
     if scheduler.is_at_limit(update.effective_chat.id):
@@ -640,10 +800,11 @@ async def _start_payment_job(update: Update, site_url: str, email: str, password
         site_url=site_url_full,
         email=email,
         password=password,
+        plan_name=plan_name,
         chat_id=update.effective_chat.id,
     )
 
-    log.info("Payment job created: id=%s email=%s site=%s", job_id, email, site_url_full)
+    log.info("Payment job created: id=%s email=%s site=%s plan=%s", job_id, email, site_url_full, plan_name)
 
     scheduler.submit_payment(pjob, card)
     log.info("Payment job submitted to scheduler: %s", job_id)

@@ -54,6 +54,8 @@ class PaymentService:
                             card_cvv=card.cvv,
                             card_holder=card.holder_name,
                             plan_name=pjob.plan_name,
+                            billing_zip=card.billing_zip,
+                            billing_country=card.billing_country,
                             progress_callback=on_progress,
                         ),
                         timeout=PAYMENT_JOB_TIMEOUT,

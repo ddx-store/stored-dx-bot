@@ -60,6 +60,8 @@ class CardInfo:
     expiry_year: str
     cvv: str
     holder_name: str
+    billing_zip: str = ""
+    billing_country: str = "US"
 
 
 @dataclass
