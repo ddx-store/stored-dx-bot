@@ -31,8 +31,8 @@ log = get_logger(__name__)
 GLOBAL_TIMEOUT = 300
 
 _NAV_TIMEOUT = 15_000
-_SPA_WAIT = 2.0
-_SHORT_WAIT = 0.8
+_SPA_WAIT = 1.0
+_SHORT_WAIT = 0.5
 
 _STEALTH_JS = """
 () => {
@@ -262,9 +262,15 @@ class PlaywrightClient:
             page = await context.new_page()
 
             api_responses = []
-            page.on("response", lambda r: api_responses.append(
-                (r.status, r.url, r.request.method)
-            ) if r.request.method == "POST" else None)
+
+            def _on_response(r):
+                try:
+                    if r.request.method == "POST":
+                        api_responses.append((r.status, r.url, r.request.method))
+                except Exception:
+                    pass
+
+            page.on("response", _on_response)
 
             result = await asyncio.wait_for(
                 self._do_register(page, site_url, email, password,
@@ -320,7 +326,7 @@ class PlaywrightClient:
                                 resent = await self._click_resend_otp(page)
                                 if resent:
                                     log.info("Resend OTP clicked, attempt %d", otp_attempt + 1)
-                                    await asyncio.sleep(3)
+                                    await asyncio.sleep(2)
                                     continue
                                 else:
                                     log.info("No resend button found, giving up")
@@ -456,7 +462,7 @@ class PlaywrightClient:
             tried_password_link = await self._try_continue_with_password(page)
             if tried_password_link:
                 self._report("اختيار التسجيل بالباسوورد...")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 await self._wait_for_spa(page)
 
             filled_count = await self._smart_fill(
@@ -484,13 +490,12 @@ class PlaywrightClient:
                     return RegistrationResult(False, message="لم أجد زر إرسال")
                 break
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(1.5)
 
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
             except Exception:
                 pass
-            await asyncio.sleep(1)
 
             if page.url.rstrip("/") != before_url.rstrip("/"):
                 await self._wait_for_cf(page, max_wait=15)
@@ -529,7 +534,7 @@ class PlaywrightClient:
                     continue
                 return step_result
 
-            new_inputs = await self._wait_for_inputs(page, max_wait=8)
+            new_inputs = await self._wait_for_inputs(page, max_wait=5)
 
             if has_register_api and new_inputs == 0:
                 return RegistrationResult(
@@ -568,7 +573,7 @@ class PlaywrightClient:
         last_result = None
 
         for step in range(1, max_profile_steps + 1):
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             await self._wait_for_spa(page)
 
             log.info("-> Profile step %d: URL=%s", step, page.url[:120])
@@ -584,14 +589,14 @@ class PlaywrightClient:
                 ok_clicked = await self._click_confirm_dialog(page)
                 if ok_clicked:
                     self._report("تم تأكيد إنشاء الحساب")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                 return RegistrationResult(
                     True,
                     message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
                     page_url=page.url,
                 )
 
-            new_inputs = await self._wait_for_inputs(page, max_wait=6)
+            new_inputs = await self._wait_for_inputs(page, max_wait=4)
             if new_inputs == 0:
                 skip_btn = await self._find_skip_button(page)
                 if skip_btn:
@@ -627,7 +632,7 @@ class PlaywrightClient:
                 ok_clicked = await self._click_confirm_dialog(page)
                 if ok_clicked:
                     self._report("تم تأكيد إنشاء الحساب")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     body2 = ""
                     try:
                         body2 = (await page.inner_text("body")).lower()
@@ -652,7 +657,7 @@ class PlaywrightClient:
                         pass
                     try:
                         await continue_btn.click()
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(1.5)
                         await self._wait_for_spa(page)
                         url_changed = page.url.rstrip("/") != before_url.rstrip("/")
                         dom_changed = False
@@ -694,18 +699,17 @@ class PlaywrightClient:
                     try:
                         await skip_btn.click()
                         self._report(f"تخطي...")
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1)
                         continue
                     except Exception:
                         pass
                 break
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(1.5)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
             except Exception:
                 pass
-            await asyncio.sleep(1)
 
             step_result = await self._analyze(page, before_url, api_responses)
             last_result = step_result
@@ -1252,7 +1256,7 @@ class PlaywrightClient:
         return None
 
     async def _fill_otp_code(self, page, code: str) -> RegistrationResult | None:
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
         await self._wait_for_spa(page)
 
         otp_selectors = [
@@ -1285,9 +1289,9 @@ class PlaywrightClient:
                             await asyncio.sleep(0.1)
                     except Exception:
                         pass
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 self._report("تم إدخال رمز التحقق")
-                await asyncio.sleep(3)
+                await asyncio.sleep(1.5)
                 await self._wait_for_spa(page)
                 body = ""
                 try:
@@ -1326,13 +1330,21 @@ class PlaywrightClient:
             return None
 
         try:
-            await otp_input.click()
-            await asyncio.sleep(0.2)
-            await otp_input.fill(code)
-            await asyncio.sleep(0.5)
+            try:
+                await otp_input.fill(code)
+            except Exception:
+                await otp_input.click(force=True)
+                await asyncio.sleep(0.2)
+                await otp_input.fill(code)
+            await asyncio.sleep(0.3)
         except Exception as exc:
-            log.warning("Failed to fill OTP: %s", exc)
-            return None
+            try:
+                await otp_input.focus()
+                await page.keyboard.type(code, delay=50)
+                await asyncio.sleep(0.3)
+            except Exception:
+                log.warning("Failed to fill OTP: %s", exc)
+                return None
 
         self._report("تم إدخال رمز التحقق -- جاري الإرسال...")
         submitted = await self._smart_submit(page)
@@ -1342,7 +1354,7 @@ class PlaywrightClient:
             except Exception:
                 pass
 
-        await asyncio.sleep(3)
+        await asyncio.sleep(1.5)
         await self._wait_for_spa(page)
 
         body = ""
@@ -1384,7 +1396,7 @@ class PlaywrightClient:
 
             new_page = await context.new_page()
             resp = await new_page.goto(link, timeout=15000, wait_until="domcontentloaded")
-            await asyncio.sleep(3)
+            await asyncio.sleep(1.5)
             await self._wait_for_spa(new_page)
 
             body = ""
@@ -1422,9 +1434,9 @@ class PlaywrightClient:
             log.warning("Verification link error: %s", exc)
             return None
 
-    async def _wait_for_inputs(self, page, max_wait: float = 8.0) -> int:
+    async def _wait_for_inputs(self, page, max_wait: float = 5.0) -> int:
         elapsed = 0.0
-        interval = 1.5
+        interval = 1.0
         while elapsed < max_wait:
             count = await self._count_visible_inputs(page)
             if count > 0:
@@ -1488,7 +1500,7 @@ class PlaywrightClient:
                     if await btn.is_visible(timeout=400):
                         before_url = page.url
                         await btn.click()
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(1.5)
                         await self._wait_for_spa(page)
                         if page.url.rstrip("/") != before_url.rstrip("/"):
                             await self._wait_for_cf(page, max_wait=15)
@@ -1514,7 +1526,7 @@ class PlaywrightClient:
                             return btn.tagName;
                         }}""")
                         if js_result:
-                            await asyncio.sleep(4)
+                            await asyncio.sleep(2)
                             if page.url.rstrip("/") != before_url.rstrip("/"):
                                 await self._wait_for_cf(page, max_wait=15)
                                 if await self._has_fillable_form(page):
@@ -1620,7 +1632,7 @@ class PlaywrightClient:
                     btn = page.get_by_text(text, exact=False).first
                     if await btn.is_visible(timeout=400):
                         await btn.click()
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(1.5)
                         await self._wait_for_spa(page)
                         if await self._has_fillable_form(page):
                             return True
@@ -1650,7 +1662,7 @@ class PlaywrightClient:
                 return False
 
             await self._wait_for_spa(page)
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             if await self._has_fillable_form(page):
                 return True
             if await self._has_email_only_form(page):
