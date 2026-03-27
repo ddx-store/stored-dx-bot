@@ -3,7 +3,7 @@ Registration service — orchestrates the full create-account flow.
 
 Uses Playwright with system Chromium for real browser automation.
 Sends real-time step-by-step updates to the user via Telegram.
-Global timeout ensures the user always gets a response within 60 seconds.
+Global timeout ensures the user always gets a response within 90 seconds.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from app.storage.repositories import ResultRepository
 
 log = get_logger(__name__)
 
-JOB_TIMEOUT = 60
+JOB_TIMEOUT = 90
 
 
 class RegistrationService:

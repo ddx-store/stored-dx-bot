@@ -6,8 +6,11 @@ Comprehensive multi-phase approach:
 2. Try common register/auth paths with register-tab clicking
 3. Fall back to homepage link scanning
 4. Fill ALL visible form fields intelligently
-5. Handle multi-step forms (fill → submit → fill next step)
+5. Handle multi-step forms (fill -> submit -> fill next step)
 6. Submit and analyze the result (API responses + page content)
+
+Stealth mode: masks headless browser fingerprints to bypass
+Cloudflare, hCaptcha, and similar bot detection systems.
 
 Global timeout: 50 seconds max for the entire registration.
 """
@@ -25,11 +28,59 @@ from app.core.utils import fake_first_name, fake_last_name, fake_username
 
 log = get_logger(__name__)
 
-GLOBAL_TIMEOUT = 50
+GLOBAL_TIMEOUT = 80
 
 _NAV_TIMEOUT = 8_000
 _SPA_WAIT = 2.0
 _SHORT_WAIT = 0.8
+
+_STEALTH_JS = """
+() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+    window.navigator.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
+
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ar'] });
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5].map(() => ({
+            name: 'Chrome PDF Plugin',
+            filename: 'internal-pdf-viewer',
+            description: 'Portable Document Format',
+        })),
+    });
+
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+        Promise.resolve({ state: Notification.permission }) :
+        originalQuery(parameters)
+    );
+
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+        if (parameter === 37445) return 'Intel Inc.';
+        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter.call(this, parameter);
+    };
+}
+"""
+
+_CF_WAIT_PHRASES = [
+    "checking your browser",
+    "verify you are human",
+    "performing security",
+    "just a moment",
+    "please wait",
+    "enable javascript",
+    "checking if the site",
+    "attention required",
+    "one more step",
+    "security check",
+]
 
 
 class RegistrationResult:
@@ -81,6 +132,15 @@ _SUCCESS_KEYWORDS = [
     "account has been created", "successfully created",
 ]
 
+_OAUTH_INDICATORS = [
+    "sign in with google", "sign in with microsoft", "sign in with apple",
+    "continue with google", "continue with microsoft", "continue with apple",
+    "login with google", "login with microsoft", "login with apple",
+    "sign in with github", "continue with github",
+    "sign in with facebook", "continue with facebook",
+    "سجل دخول بجوجل", "تسجيل بجوجل",
+]
+
 
 class PlaywrightClient:
     def __init__(self, timeout: int = 8_000) -> None:
@@ -93,7 +153,7 @@ class PlaywrightClient:
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            return RegistrationResult(False, message="Playwright غير مثبّت")
+            return RegistrationResult(False, message="Playwright غير مثبت")
 
         first = fake_first_name()
         last = fake_last_name()
@@ -112,6 +172,12 @@ class PlaywrightClient:
                     "--disable-dev-shm-usage", "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-extensions",
+                    "--disable-infobars",
+                    "--window-size=1920,1080",
+                    "--start-maximized",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
                 ],
             }
             if chromium_path:
@@ -119,12 +185,26 @@ class PlaywrightClient:
 
             browser = await pw_instance.chromium.launch(**launch_args)
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
                 locale="en-US",
+                timezone_id="America/New_York",
+                color_scheme="light",
+                java_script_enabled=True,
+                bypass_csp=True,
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+                    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                },
             )
+
+            await context.add_init_script(_STEALTH_JS)
             page = await context.new_page()
 
             api_responses = []
@@ -142,7 +222,7 @@ class PlaywrightClient:
             log.error("Global timeout (%ds) reached for %s", GLOBAL_TIMEOUT, site_url)
             return RegistrationResult(
                 False,
-                message=f"انتهى الوقت ({GLOBAL_TIMEOUT}ث) — الموقع بطيء أو محمي"
+                message=f"انتهى الوقت ({GLOBAL_TIMEOUT}ث) -- الموقع بطيء أو محمي"
             )
         except Exception as exc:
             log.error("Playwright error: %s", exc)
@@ -160,12 +240,54 @@ class PlaywrightClient:
                 log.warning("Playwright stop timed out")
 
     def _report(self, msg: str):
-        log.info("→ %s", msg)
+        log.info("-> %s", msg)
         if self._progress_callback:
             try:
                 self._progress_callback(msg)
             except Exception:
                 pass
+
+    async def _wait_for_cf(self, page, max_wait: float = 12.0) -> bool:
+        """Wait for Cloudflare/bot-check challenge to resolve.
+        Returns True if page loaded successfully, False if still blocked.
+        """
+        elapsed = 0.0
+        interval = 1.5
+        while elapsed < max_wait:
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                body = ""
+
+            is_challenge = any(phrase in body for phrase in _CF_WAIT_PHRASES)
+            if not is_challenge:
+                return True
+
+            log.debug("Cloudflare challenge detected, waiting... (%.1fs)", elapsed)
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+        log.warning("Cloudflare challenge did not resolve after %.1fs", max_wait)
+        return False
+
+    async def _is_oauth_only(self, page) -> bool:
+        """Check if the page only offers OAuth login (no email+password form)."""
+        try:
+            body = (await page.inner_text("body")).lower()
+        except Exception:
+            return False
+
+        oauth_count = sum(1 for ind in _OAUTH_INDICATORS if ind in body)
+
+        has_email = bool(await page.query_selector(
+            'input[type="email"], input[name*="email"], input[placeholder*="email" i]'
+        ))
+        has_password = bool(await page.query_selector('input[type="password"]'))
+
+        if oauth_count >= 2 and not has_email and not has_password:
+            return True
+
+        return False
 
     async def _do_register(self, page, site_url, email, password,
                            first, last, username, phone, api_responses):
@@ -174,6 +296,11 @@ class PlaywrightClient:
         reg_found = await self._navigate_to_register(page, site_url)
 
         if not reg_found:
+            if await self._is_oauth_only(page):
+                return RegistrationResult(
+                    False,
+                    message="هذا الموقع يدعم التسجيل عبر Google/Microsoft/Apple فقط -- لا يوجد نموذج تسجيل عادي"
+                )
             return RegistrationResult(
                 False,
                 message="لم أجد صفحة تسجيل على هذا الموقع"
@@ -182,66 +309,105 @@ class PlaywrightClient:
         current_url = page.url
         self._report(f"وجدت نموذج في: {current_url}")
 
-        filled_count = await self._smart_fill(
-            page, email, password, first, last, username, phone
-        )
+        max_steps = 5
+        last_result = None
 
-        if filled_count == 0:
-            return RegistrationResult(
-                False,
-                message="وجدت الصفحة لكن لم أجد حقول لملئها"
-            )
+        for step in range(1, max_steps + 1):
+            tried_password_link = await self._try_continue_with_password(page)
+            if tried_password_link:
+                self._report("اختيار التسجيل بالباسوورد...")
+                await asyncio.sleep(2)
+                await self._wait_for_spa(page)
 
-        await asyncio.sleep(0.3)
-
-        self._report("إرسال النموذج...")
-        before_url = page.url
-        api_responses.clear()
-        submitted = await self._smart_submit(page)
-        if not submitted:
-            return RegistrationResult(False, message="لم أجد زر إرسال")
-
-        await asyncio.sleep(2.5)
-
-        step1_result = await self._analyze(page, before_url, api_responses)
-
-        if not step1_result.success:
-            return step1_result
-
-        has_api_success = any(
-            method == "POST" and 200 <= status < 300
-            and any(k in url.lower() for k in ["register", "signup", "auth", "account", "join"])
-            for status, url, method in api_responses
-        )
-        if has_api_success:
-            if step1_result.message == "تم إرسال النموذج — تحقق من النتيجة":
-                step1_result.message = "تم إنشاء الحساب بنجاح"
-            return step1_result
-
-        current_path = urlparse(page.url).path.lower()
-        is_still_auth = any(k in current_path for k in [
-            "auth", "login", "register", "signup", "sign-up",
-        ])
-        if not is_still_auth:
-            return step1_result
-
-        new_inputs = await self._count_visible_inputs(page)
-        if new_inputs >= 1:
-            self._report("مرحلة ثانية — ملء حقول إضافية...")
-            filled2 = await self._smart_fill(
+            filled_count = await self._smart_fill(
                 page, email, password, first, last, username, phone
             )
-            if filled2 > 0:
-                await asyncio.sleep(0.3)
-                api_responses.clear()
-                before_url2 = page.url
-                await self._smart_submit(page)
-                await asyncio.sleep(2)
-                step2_result = await self._analyze(page, before_url2, api_responses)
-                if step2_result.message and step2_result.message != step1_result.message:
-                    return step2_result
 
-        return step1_result
+            if filled_count == 0 and step == 1:
+                return RegistrationResult(
+                    False,
+                    message="وجدت الصفحة لكن لم أجد حقول لملئها"
+                )
+
+            if filled_count == 0:
+                break
+
+            await asyncio.sleep(0.3)
+
+            step_label = f"الخطوة {step}" if step > 1 else "إرسال النموذج"
+            self._report(f"{step_label}...")
+            before_url = page.url
+            api_responses.clear()
+            submitted = await self._smart_submit(page)
+            if not submitted:
+                if step == 1:
+                    return RegistrationResult(False, message="لم أجد زر إرسال")
+                break
+
+            await asyncio.sleep(3)
+
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+            step_result = await self._analyze(page, before_url, api_responses)
+            last_result = step_result
+
+            if not step_result.success:
+                return step_result
+
+            has_api_success = any(
+                method == "POST" and 200 <= status < 300
+                and any(k in url.lower() for k in ["register", "signup", "auth", "account", "join", "create", "password"])
+                for status, url, method in api_responses
+            )
+
+            if step_result.needs_otp:
+                can_use_pw = await self._try_continue_with_password(page)
+                if can_use_pw:
+                    self._report("اختيار التسجيل بالباسوورد بدل OTP...")
+                    await asyncio.sleep(2)
+                    await self._wait_for_spa(page)
+                    continue
+                return step_result
+
+            if any(kw in step_result.message for kw in ["تم إنشاء الحساب", "بنجاح"]):
+                return step_result
+
+            new_inputs = await self._count_visible_inputs(page)
+            if new_inputs == 0:
+                if has_api_success:
+                    step_result.message = "تم إنشاء الحساب بنجاح"
+                return step_result
+
+            self._report(f"مرحلة {step + 1} -- ملء حقول إضافية...")
+
+        if last_result:
+            return last_result
+
+        return RegistrationResult(
+            True,
+            message="تم إرسال النموذج -- تحقق من النتيجة",
+            page_url=page.url
+        )
+
+    async def _try_continue_with_password(self, page) -> bool:
+        password_link_texts = [
+            "continue with password", "use password",
+            "sign in with password", "use a password",
+            "log in with password", "enter password instead",
+        ]
+        for text in password_link_texts:
+            try:
+                link = page.get_by_text(text, exact=False).first
+                if await link.is_visible(timeout=500):
+                    await link.click()
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def _navigate_to_register(self, page, site_url: str) -> bool:
         parsed = urlparse(site_url)
@@ -251,6 +417,9 @@ class PlaywrightClient:
         if has_path:
             if await self._try_url_smart(page, site_url):
                 return True
+
+        if await self._quick_homepage_check(page, base_url):
+            return True
 
         for path in _REGISTER_PATHS:
             url = urljoin(base_url + "/", path)
@@ -262,17 +431,71 @@ class PlaywrightClient:
             if await self._try_url_with_register_tab(page, url):
                 return True
 
+        if await self._try_homepage_form(page, base_url):
+            return True
+
         if await self._try_homepage_links(page, base_url):
             return True
 
         return False
 
+    async def _quick_homepage_check(self, page, base_url: str) -> bool:
+        try:
+            resp = await page.goto(base_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            status = resp.status if resp else 0
+            if status == 403 or status == 503:
+                self._report("حماية Cloudflare -- جاري المحاولة...")
+                cf_ok = await self._wait_for_cf(page, max_wait=12)
+                if not cf_ok:
+                    return False
+            elif status >= 400:
+                return False
+            await self._wait_for_spa(page)
+
+            if await self._has_fillable_form(page):
+                return True
+            if await self._has_email_only_form(page):
+                return True
+
+            signup_btn_texts = [
+                "sign up for free", "sign up", "signup", "register",
+                "create account", "get started", "إنشاء حساب",
+                "سجل", "تسجيل", "سجل الآن",
+            ]
+            for text in signup_btn_texts:
+                try:
+                    btn = page.get_by_text(text, exact=False).first
+                    if await btn.is_visible(timeout=400):
+                        await btn.click()
+                        await asyncio.sleep(2)
+                        await self._wait_for_spa(page)
+                        if await self._has_fillable_form(page):
+                            return True
+                        if await self._has_email_only_form(page):
+                            return True
+                        break
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+        return False
+
     async def _try_url_smart(self, page, url: str) -> bool:
         try:
             resp = await page.goto(url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
-            if resp and resp.status >= 400:
-                log.debug("_try_url %s → HTTP %s", url, resp.status)
+            status = resp.status if resp else 0
+
+            if status == 403 or status == 503:
+                cf_ok = await self._wait_for_cf(page, max_wait=6)
+                if not cf_ok:
+                    log.debug("CF block at %s (status=%s)", url, status)
+                    return False
+
+            elif status >= 400:
+                log.debug("_try_url %s -> HTTP %s", url, status)
                 return False
+
             await self._wait_for_spa(page)
             if await self._has_fillable_form(page):
                 return True
@@ -286,8 +509,15 @@ class PlaywrightClient:
     async def _try_url_with_register_tab(self, page, url: str) -> bool:
         try:
             resp = await page.goto(url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
-            if resp and resp.status >= 400:
+            status = resp.status if resp else 0
+
+            if status == 403 or status == 503:
+                cf_ok = await self._wait_for_cf(page, max_wait=5)
+                if not cf_ok:
+                    return False
+            elif status >= 400:
                 return False
+
             await self._wait_for_spa(page)
             if await self._click_register_tab(page):
                 await asyncio.sleep(1)
@@ -301,7 +531,12 @@ class PlaywrightClient:
 
     async def _try_homepage_links(self, page, base_url: str) -> bool:
         try:
-            await page.goto(base_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            resp = await page.goto(base_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            status = resp.status if resp else 0
+            if status == 403 or status == 503:
+                cf_ok = await self._wait_for_cf(page, max_wait=12)
+                if not cf_ok:
+                    return False
             await self._wait_for_spa(page)
         except Exception:
             return False
@@ -330,9 +565,46 @@ class PlaywrightClient:
                 continue
         return False
 
+    async def _try_homepage_form(self, page, base_url: str) -> bool:
+        try:
+            current = page.url
+            if not current.startswith(base_url):
+                resp = await page.goto(base_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+                status = resp.status if resp else 0
+                if status == 403 or status == 503:
+                    cf_ok = await self._wait_for_cf(page, max_wait=12)
+                    if not cf_ok:
+                        return False
+                await self._wait_for_spa(page)
+        except Exception:
+            return False
+
+        signup_btn_texts = [
+            "sign up", "signup", "register", "create account",
+            "get started", "sign up for free", "إنشاء حساب",
+            "سجل", "تسجيل",
+        ]
+        for text in signup_btn_texts:
+            try:
+                btn = page.get_by_text(text, exact=False).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click()
+                    await asyncio.sleep(2)
+                    await self._wait_for_spa(page)
+                    break
+            except Exception:
+                continue
+
+        if await self._has_fillable_form(page):
+            return True
+        if await self._has_email_only_form(page):
+            return True
+
+        return False
+
     async def _wait_for_spa(self, page):
         try:
-            await page.wait_for_load_state("networkidle", timeout=2000)
+            await page.wait_for_load_state("networkidle", timeout=3000)
         except Exception:
             pass
         await asyncio.sleep(0.3)
@@ -367,6 +639,46 @@ class PlaywrightClient:
             except Exception:
                 continue
         return count
+
+    async def _has_email_only_form(self, page) -> bool:
+        email_input = await page.query_selector(
+            'input[type="email"], input[name="email"], '
+            'input[placeholder*="email" i], input[placeholder*="mail" i], '
+            'input[autocomplete="email"]'
+        )
+        if not email_input:
+            return False
+        try:
+            if not await email_input.is_visible():
+                return False
+        except Exception:
+            return False
+
+        continue_btn = None
+        for text in ["continue", "next", "التالي", "متابعة", "إرسال"]:
+            try:
+                btn = page.get_by_text(text, exact=False).first
+                if await btn.is_visible(timeout=300):
+                    continue_btn = btn
+                    break
+            except Exception:
+                continue
+
+        if not continue_btn:
+            for sel in ['button[type="submit"]', 'input[type="submit"]']:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=300):
+                        continue_btn = btn
+                        break
+                except Exception:
+                    continue
+
+        if continue_btn:
+            log.info("-> Found email-only form (multi-step signup)")
+            return True
+
+        return False
 
     async def _has_fillable_form(self, page, require_register_context=False) -> bool:
         has_email = False
@@ -541,16 +853,17 @@ class PlaywrightClient:
             except Exception:
                 pass
 
-        log.info("→ Filled %d fields: %s", len(filled), ", ".join(filled))
+        log.info("-> Filled %d fields: %s", len(filled), ", ".join(filled))
         return len(filled)
 
     async def _fill_field(self, inp, value: str):
         try:
             await inp.click()
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(random.uniform(0.05, 0.15))
         except Exception:
             pass
         await inp.fill(value)
+        await asyncio.sleep(random.uniform(0.03, 0.1))
 
     async def _smart_submit(self, page) -> bool:
         submit_texts = [
@@ -613,16 +926,16 @@ class PlaywrightClient:
                     "account", "join", "create",
                 ]):
                     if 200 <= status < 300:
-                        log.info("→ API success: %s %s", status, url[:100])
+                        log.info("-> API success: %s %s", status, url[:100])
                     elif status == 409 or status == 422:
-                        log.warning("→ API conflict/validation: %s %s", status, url[:100])
+                        log.warning("-> API conflict/validation: %s %s", status, url[:100])
                         return RegistrationResult(
                             False,
-                            message="الحساب موجود مسبقاً أو البيانات غير صحيحة",
+                            message="الحساب موجود مسبقا أو البيانات غير صحيحة",
                             page_url=current_url
                         )
                     elif status >= 400:
-                        log.warning("→ API failed: %s %s", status, url[:100])
+                        log.warning("-> API failed: %s %s", status, url[:100])
 
         body = ""
         try:
@@ -633,14 +946,14 @@ class PlaywrightClient:
         if any(kw in body for kw in _ERROR_KEYWORDS):
             return RegistrationResult(
                 False,
-                message="الحساب موجود مسبقاً بهذا الإيميل",
+                message="الحساب موجود مسبقا بهذا الايميل",
                 page_url=current_url
             )
 
         if any(kw in body for kw in _OTP_KEYWORDS):
             return RegistrationResult(
                 True, needs_otp=True,
-                message="تم التسجيل — بانتظار رمز التحقق",
+                message="تم التسجيل -- بانتظار رمز التحقق",
                 page_url=current_url
             )
 
@@ -653,9 +966,32 @@ class PlaywrightClient:
 
         if current_url.rstrip("/") != before_url.rstrip("/"):
             path = current_url.lower()
+
+            still_has_inputs = False
+            try:
+                inputs = await page.query_selector_all("input")
+                for inp in inputs:
+                    try:
+                        if await inp.is_visible():
+                            t = (await inp.get_attribute("type") or "text").lower()
+                            if t not in ("hidden", "submit", "button", "file", "image", "reset"):
+                                still_has_inputs = True
+                                break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if still_has_inputs:
+                return RegistrationResult(
+                    True,
+                    message="تم إرسال النموذج -- تحقق من النتيجة",
+                    page_url=current_url
+                )
+
             if any(k in path for k in [
                 "account", "dashboard", "profile", "home",
-                "welcome", "verify", "confirm",
+                "welcome",
             ]):
                 return RegistrationResult(
                     True,
@@ -678,6 +1014,6 @@ class PlaywrightClient:
 
         return RegistrationResult(
             True,
-            message="تم إرسال النموذج — تحقق من النتيجة",
+            message="تم إرسال النموذج -- تحقق من النتيجة",
             page_url=current_url
         )
