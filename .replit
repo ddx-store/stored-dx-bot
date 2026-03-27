@@ -17,6 +17,26 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Telegram Bot"
+
+[[workflows.workflow]]
+name = "Telegram Bot"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python3.11 bot_system/app/main.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -27,3 +47,17 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+TELEGRAM_BOT_TOKEN = "1881350387:AAE5_HUyUNtE6w6An2eCCSsuEtTyHHDX42c"
+TELEGRAM_ALLOWED_USER_IDS = "331753565"
+GMAIL_USER = "testddx21@gmail.com"
+GMAIL_APP_PASSWORD = "idviirzmadiahooy"
+GMAIL_OTP_LABEL = "TO_BOT"
+SITE_API_BASE_URL = "https://YOUR_SITE_BASE_URL_HERE/api/v1"
+DB_PATH = "bot_system/data/jobs.db"
+LOG_LEVEL = "INFO"
+OTP_TIMEOUT_SECONDS = "120"
+OTP_POLL_INTERVAL_SECONDS = "5"

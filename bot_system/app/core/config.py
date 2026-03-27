@@ -1,7 +1,6 @@
 """
 Configuration module — reads all settings from environment variables.
-All values are typed and validated at startup. Missing required values
-raise a clear error immediately rather than failing silently later.
+All values are typed and validated at startup.
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ def _bool(key: str, default: bool = False) -> bool:
     if raw in ("0", "false", "no", ""):
         return default
     raise EnvironmentError(
-        f"Environment variable '{key}' must be a boolean (true/false/1/0), got: {raw!r}"
+        f"Environment variable '{key}' must be a boolean, got: {raw!r}"
     )
 
 
@@ -53,8 +52,6 @@ class Config:
     # ------------------------------------------------------------------ #
     TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
 
-    # Comma-separated Telegram user IDs allowed to interact with the bot.
-    # Example: "123456789,987654321"
     TELEGRAM_ALLOWED_USER_IDS: List[int] = [
         int(uid.strip())
         for uid in _optional("TELEGRAM_ALLOWED_USER_IDS", "").split(",")
@@ -62,27 +59,23 @@ class Config:
     ]
 
     # ------------------------------------------------------------------ #
-    # Gmail API
+    # Gmail — IMAP with App Password
     # ------------------------------------------------------------------ #
-    GMAIL_CREDENTIALS_FILE: str = _optional(
-        "GMAIL_CREDENTIALS_FILE", "credentials.json"
-    )
+    GMAIL_USER: str = _optional("GMAIL_USER", "")
+    GMAIL_APP_PASSWORD: str = _optional("GMAIL_APP_PASSWORD", "")
+    GMAIL_OTP_LABEL: str = _optional("GMAIL_OTP_LABEL", "TO_BOT")
+
+    # Legacy OAuth fields (kept for backwards compat, not used with IMAP)
+    GMAIL_CREDENTIALS_FILE: str = _optional("GMAIL_CREDENTIALS_FILE", "credentials.json")
     GMAIL_TOKEN_FILE: str = _optional("GMAIL_TOKEN_FILE", "token.json")
-    # Gmail label name where OTP emails land (e.g. "OTP" or "otp-inbox")
-    GMAIL_OTP_LABEL: str = _optional("GMAIL_OTP_LABEL", "OTP")
 
     # ------------------------------------------------------------------ #
     # Target website integration
     # ------------------------------------------------------------------ #
-    # Base URL of the site's API — set this to your own domain.
-    # Example: https://mysite.com/api/v1
     SITE_API_BASE_URL: str = _optional(
         "SITE_API_BASE_URL", "https://YOUR_SITE_BASE_URL_HERE/api/v1"
     )
-    # API key or bearer token used to authenticate with the site API.
     SITE_API_KEY: str = _optional("SITE_API_KEY", "")
-
-    # Set to "playwright" to use browser fallback instead of HTTP API.
     SITE_INTEGRATION_MODE: str = _optional("SITE_INTEGRATION_MODE", "api")
 
     # ------------------------------------------------------------------ #
@@ -90,7 +83,6 @@ class Config:
     # ------------------------------------------------------------------ #
     OTP_TIMEOUT_SECONDS: int = _int("OTP_TIMEOUT_SECONDS", 120)
     OTP_POLL_INTERVAL_SECONDS: int = _int("OTP_POLL_INTERVAL_SECONDS", 5)
-    # Maximum OTP submission attempts before marking a job failed.
     OTP_MAX_ATTEMPTS: int = _int("OTP_MAX_ATTEMPTS", 3)
 
     # ------------------------------------------------------------------ #
@@ -104,12 +96,11 @@ class Config:
     LOG_LEVEL: str = _optional("LOG_LEVEL", "INFO").upper()
 
     # ------------------------------------------------------------------ #
-    # Request / network
+    # Network
     # ------------------------------------------------------------------ #
     HTTP_TIMEOUT_SECONDS: int = _int("HTTP_TIMEOUT_SECONDS", 30)
     HTTP_MAX_RETRIES: int = _int("HTTP_MAX_RETRIES", 3)
     HTTP_RETRY_BACKOFF: float = float(_optional("HTTP_RETRY_BACKOFF", "1.5"))
 
 
-# Module-level singleton so every import gets the same object.
 config = Config()

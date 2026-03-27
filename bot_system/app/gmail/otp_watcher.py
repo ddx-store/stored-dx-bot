@@ -1,17 +1,9 @@
 """
-OTP email watcher.
+OTP email watcher — IMAP polling version.
 
-Polls the configured Gmail label for new OTP emails and stores parsed
-results in the database. The main entry point for a job is
-``wait_for_otp(job)``, which blocks (with polling) until an OTP is
-found or the timeout is exceeded.
-
-Design notes:
-- All fetched messages are persisted to avoid re-processing.
-- Matching is delegated to matcher.py so this module stays focused on
-  fetching and parsing.
-- Push notification support can be layered on top by replacing the poll
-  loop with a Cloud Pub/Sub handler that calls _process_messages().
+Polls the configured Gmail label for new OTP emails every
+OTP_POLL_INTERVAL_SECONDS seconds until an OTP is found or the
+OTP_TIMEOUT_SECONDS deadline is reached.
 """
 
 from __future__ import annotations
@@ -22,7 +14,7 @@ from typing import Optional
 
 from app.core.config import config
 from app.core.logger import get_logger
-from app.gmail.gmail_client import GmailClient, GmailAPIError
+from app.gmail.gmail_client import GmailClient, GmailAPIError, GmailAuthError
 from app.gmail.matcher import match_otp_message
 from app.gmail.parser import extract_otp
 from app.storage.db import get_connection
@@ -42,6 +34,7 @@ class OtpWatcher:
         self._conn = get_connection()
         self._otp_repo = OtpMessageRepository(self._conn)
         self._label_id: Optional[str] = None
+        self._connected = False
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -50,11 +43,10 @@ class OtpWatcher:
     def wait_for_otp(self, job: Job) -> OtpMessage:
         """
         Block until an OTP email arrives for *job* or the timeout expires.
-
-        Returns the matched OtpMessage (with otp_value or link_value set).
+        Returns the matched OtpMessage with otp_value or link_value set.
         Raises OtpTimeout on expiry.
         """
-        self._ensure_authenticated()
+        self._ensure_connected()
         self._ensure_label()
 
         deadline = time.monotonic() + config.OTP_TIMEOUT_SECONDS
@@ -84,51 +76,67 @@ class OtpWatcher:
     # Internal helpers
     # ------------------------------------------------------------------ #
 
-    def _ensure_authenticated(self) -> None:
-        self._gmail.authenticate()
+    def _ensure_connected(self) -> None:
+        if not self._connected:
+            try:
+                self._gmail.connect()
+                self._connected = True
+            except GmailAuthError as exc:
+                log.error("Gmail IMAP auth failed: %s", exc)
+                raise
 
     def _ensure_label(self) -> None:
-        if self._label_id is not None:
-            return
-        label_name = config.GMAIL_OTP_LABEL
-        self._label_id = self._gmail.get_label_id(label_name)
-        if not self._label_id:
-            log.warning(
-                "Gmail label %r not found — will search inbox without label filter",
-                label_name,
-            )
+        if self._label_id is None:
+            self._label_id = config.GMAIL_OTP_LABEL
 
     def _poll_once(self, job: Job) -> Optional[OtpMessage]:
-        """Fetch recent messages, parse them, and try to match one to *job*."""
+        """Fetch recent messages from the label, parse, and try to match."""
         try:
             stubs = self._gmail.list_messages(
                 label_id=self._label_id,
                 query=f"to:{job.email}",
                 max_results=10,
             )
-        except GmailAPIError as exc:
+        except (GmailAPIError, Exception) as exc:
             log.error("Gmail list_messages failed: %s", exc)
+            # Try to reconnect on next poll
+            self._connected = False
+            try:
+                self._gmail.connect()
+                self._connected = True
+            except Exception:
+                pass
+            return None
+
+        if not stubs:
+            log.debug("No messages found in label %r for %s", self._label_id, job.email)
             return None
 
         candidates: list[OtpMessage] = []
 
         for stub in stubs:
             msg_id = stub["id"]
-            if self._otp_repo.is_processed(msg_id):
+            # Use label+id as unique key to avoid re-processing
+            unique_key = f"{self._label_id}:{msg_id}"
+            if self._otp_repo.is_processed(unique_key):
                 continue
 
             try:
                 full = self._gmail.get_message(msg_id)
-            except GmailAPIError as exc:
+            except Exception as exc:
                 log.warning("Could not fetch message %s: %s", msg_id, exc)
                 continue
 
             headers = self._gmail.extract_headers(full)
             body = self._gmail.extract_body_text(full)
 
+            if not body:
+                log.debug("Empty body for message %s — skipping", msg_id)
+                continue
+
             otp_code, otp_type, link = extract_otp(body)
 
-            # Parse received date from internalDate (milliseconds since epoch).
+            # Parse timestamp
             internal_ms = int(full.get("internalDate", 0))
             received_at: Optional[datetime] = None
             if internal_ms:
@@ -136,11 +144,18 @@ class OtpWatcher:
                     internal_ms / 1000, tz=timezone.utc
                 )
 
+            # Determine recipient: prefer To header, fall back to job email
+            to_header = headers.get("to", "")
+            # Extract bare email from "Name <email>" format
+            import re
+            rcpt_match = re.search(r"[\w.+\-]+@[\w.\-]+", to_header)
+            recipient = rcpt_match.group(0) if rcpt_match else job.email
+
             otp_msg = OtpMessage(
-                gmail_message_id=msg_id,
+                gmail_message_id=unique_key,
                 sender=headers.get("from"),
                 subject=headers.get("subject"),
-                recipient=headers.get("to") or job.email,
+                recipient=recipient,
                 received_at=received_at,
                 otp_value=otp_code,
                 otp_type=otp_type,
@@ -149,10 +164,13 @@ class OtpWatcher:
             otp_msg = self._otp_repo.save(otp_msg)
             candidates.append(otp_msg)
 
+        if not candidates:
+            return None
+
         match = match_otp_message(job, candidates)
         if match:
             self._otp_repo.mark_processed(match.gmail_message_id, job.job_id)
-            self._gmail.mark_as_read(match.gmail_message_id)
+            self._gmail.mark_as_read(msg_id)
             return match
 
         return None

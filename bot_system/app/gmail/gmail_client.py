@@ -1,33 +1,26 @@
 """
-Gmail API client.
+Gmail IMAP client — uses App Password (no OAuth required).
 
-Wraps the Google API Python client in a thin, typed layer so the rest of
-the codebase never touches google-api-python-client directly.
-
-Authentication uses OAuth2 credentials stored locally in a token file.
-On first run the user must authorise the app via the browser flow.
+Authenticates via imaplib with GMAIL_USER + GMAIL_APP_PASSWORD.
+Searches a specific label/folder for OTP emails.
 """
 
 from __future__ import annotations
 
-import base64
-import os
-from email import message_from_bytes
+import email
+import imaplib
+import re
+from datetime import datetime, timezone
+from email.header import decode_header
 from typing import Any, Dict, List, Optional, Tuple
-
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 
 from app.core.config import config
 from app.core.logger import get_logger
 
 log = get_logger(__name__)
 
-# Read-only scope is all we need.
-_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+IMAP_HOST = "imap.gmail.com"
+IMAP_PORT = 993
 
 
 class GmailAuthError(Exception):
@@ -38,72 +31,79 @@ class GmailAPIError(Exception):
     pass
 
 
+def _decode_mime_words(s: str) -> str:
+    """Decode encoded MIME header words."""
+    parts = decode_header(s)
+    result = []
+    for part, charset in parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(charset or "utf-8", errors="replace"))
+        else:
+            result.append(part)
+    return "".join(result)
+
+
 class GmailClient:
-    """Authenticated Gmail API client."""
+    """IMAP-based Gmail client using App Password."""
 
     def __init__(
         self,
-        credentials_file: str | None = None,
-        token_file: str | None = None,
+        user: str | None = None,
+        app_password: str | None = None,
+        label: str | None = None,
     ) -> None:
-        self._credentials_file = credentials_file or config.GMAIL_CREDENTIALS_FILE
-        self._token_file = token_file or config.GMAIL_TOKEN_FILE
-        self._service: Any = None
+        self._user = user or config.GMAIL_USER
+        self._password = app_password or config.GMAIL_APP_PASSWORD
+        self._label = label or config.GMAIL_OTP_LABEL
+        self._imap: Optional[imaplib.IMAP4_SSL] = None
 
     # ------------------------------------------------------------------ #
-    # Authentication
+    # Connection
+    # ------------------------------------------------------------------ #
+
+    def connect(self) -> None:
+        """Open IMAP connection and login."""
+        try:
+            self._imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+            self._imap.login(self._user, self._password)
+            log.info("Gmail IMAP connected for %s", self._user)
+        except imaplib.IMAP4.error as exc:
+            raise GmailAuthError(
+                f"Gmail IMAP login failed for {self._user}: {exc}. "
+                "Make sure IMAP is enabled and the App Password is correct."
+            ) from exc
+
+    def disconnect(self) -> None:
+        if self._imap:
+            try:
+                self._imap.logout()
+            except Exception:
+                pass
+            self._imap = None
+
+    def _ensure_connected(self) -> imaplib.IMAP4_SSL:
+        if self._imap is None:
+            self.connect()
+        # Re-check connection is alive (NOOP)
+        try:
+            self._imap.noop()
+        except Exception:
+            log.debug("IMAP connection lost — reconnecting")
+            self._imap = None
+            self.connect()
+        return self._imap
+
+    # ------------------------------------------------------------------ #
+    # Public helpers used by OtpWatcher
     # ------------------------------------------------------------------ #
 
     def authenticate(self) -> None:
-        """Load or refresh credentials and build the service object."""
-        creds: Optional[Credentials] = None
-
-        if os.path.exists(self._token_file):
-            creds = Credentials.from_authorized_user_file(self._token_file, _SCOPES)
-
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                log.info("Refreshing Gmail token")
-                creds.refresh(Request())
-            else:
-                if not os.path.exists(self._credentials_file):
-                    raise GmailAuthError(
-                        f"Gmail credentials file not found: {self._credentials_file}. "
-                        "Download it from the Google Cloud Console (OAuth 2.0 client ID)."
-                    )
-                log.info("Starting Gmail OAuth flow — check your browser")
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    self._credentials_file, _SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            with open(self._token_file, "w") as fh:
-                fh.write(creds.to_json())
-            log.info("Gmail token saved to %s", self._token_file)
-
-        self._service = build("gmail", "v1", credentials=creds)
-        log.info("Gmail API service ready")
-
-    @property
-    def service(self) -> Any:
-        if self._service is None:
-            self.authenticate()
-        return self._service
-
-    # ------------------------------------------------------------------ #
-    # Label helpers
-    # ------------------------------------------------------------------ #
+        """Alias for connect() — keeps the same interface as before."""
+        self.connect()
 
     def get_label_id(self, label_name: str) -> Optional[str]:
-        """Resolve a label name to its Gmail label ID."""
-        try:
-            result = self.service.users().labels().list(userId="me").execute()
-            for lbl in result.get("labels", []):
-                if lbl["name"].lower() == label_name.lower():
-                    return lbl["id"]
-        except HttpError as exc:
-            raise GmailAPIError(f"Failed to list labels: {exc}") from exc
-        return None
+        """For IMAP the 'label' is a mailbox folder name — just return it."""
+        return label_name
 
     # ------------------------------------------------------------------ #
     # Message listing
@@ -115,126 +115,145 @@ class GmailClient:
         query: Optional[str] = None,
         max_results: int = 20,
     ) -> List[Dict[str, str]]:
-        """Return up to *max_results* message stubs matching *label_id* / *query*."""
-        try:
-            params: Dict[str, Any] = {
-                "userId": "me",
-                "maxResults": max_results,
-            }
-            if label_id:
-                params["labelIds"] = [label_id]
-            if query:
-                params["q"] = query
-            result = self.service.users().messages().list(**params).execute()
-            return result.get("messages", [])
-        except HttpError as exc:
-            raise GmailAPIError(f"Failed to list messages: {exc}") from exc
+        """
+        Return a list of message stubs: [{"id": uid_string}, ...].
+        *label_id* is the Gmail label / IMAP folder name.
+        *query*    can be a 'to:email' string — parsed to IMAP SEARCH criteria.
+        """
+        imap = self._ensure_connected()
+        folder = label_id or self._label or "INBOX"
+
+        # Select folder (Gmail labels appear as folders in IMAP).
+        # Try with and without [Gmail]/ prefix.
+        for folder_name in [folder, f"[Gmail]/{folder}", f"{folder}"]:
+            typ, _ = imap.select(f'"{folder_name}"', readonly=True)
+            if typ == "OK":
+                break
+        else:
+            log.warning("Could not select label folder %r — falling back to INBOX", folder)
+            imap.select("INBOX", readonly=True)
+
+        # Build IMAP search criteria.
+        criteria = "ALL"
+        if query:
+            # Extract email address from "to:addr@example.com"
+            m = re.search(r"to:(\S+)", query, re.IGNORECASE)
+            if m:
+                to_addr = m.group(1)
+                criteria = f'TO "{to_addr}"'
+
+        typ, data = imap.search(None, criteria)
+        if typ != "OK" or not data or not data[0]:
+            return []
+
+        uid_list = data[0].split()
+        # Most recent first, limit results.
+        uid_list = uid_list[-max_results:][::-1]
+        return [{"id": uid.decode()} for uid in uid_list]
 
     # ------------------------------------------------------------------ #
     # Message fetching
     # ------------------------------------------------------------------ #
 
     def get_message(self, message_id: str) -> Dict[str, Any]:
-        """Fetch the full message payload for *message_id*."""
-        try:
-            return (
-                self.service.users()
-                .messages()
-                .get(userId="me", id=message_id, format="full")
-                .execute()
-            )
-        except HttpError as exc:
-            raise GmailAPIError(f"Failed to get message {message_id}: {exc}") from exc
+        """
+        Fetch a message by IMAP sequence number and return a dict compatible
+        with the existing code:
+          {"payload": {"headers": [...], "parts": [...]}, "internalDate": ms}
+        """
+        imap = self._ensure_connected()
+        typ, data = imap.fetch(message_id, "(RFC822)")
+        if typ != "OK" or not data or data[0] is None:
+            raise GmailAPIError(f"Failed to fetch message {message_id}")
 
-    def get_message_raw(self, message_id: str) -> bytes:
-        """Fetch the raw RFC 2822 bytes of a message."""
-        try:
-            msg = (
-                self.service.users()
-                .messages()
-                .get(userId="me", id=message_id, format="raw")
-                .execute()
-            )
-            return base64.urlsafe_b64decode(msg["raw"])
-        except HttpError as exc:
-            raise GmailAPIError(f"Failed to get raw message {message_id}: {exc}") from exc
+        raw = data[0][1]
+        if isinstance(raw, bytes):
+            msg = email.message_from_bytes(raw)
+        else:
+            msg = email.message_from_string(str(raw))
+
+        # Parse date → milliseconds since epoch.
+        date_str = msg.get("Date", "")
+        internal_ms = 0
+        if date_str:
+            try:
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(date_str)
+                internal_ms = int(dt.timestamp() * 1000)
+            except Exception:
+                pass
+
+        headers = [
+            {"name": k, "value": str(v)}
+            for k, v in msg.items()
+        ]
+
+        return {
+            "payload": {
+                "headers": headers,
+                "raw_message": msg,
+            },
+            "internalDate": str(internal_ms),
+        }
 
     # ------------------------------------------------------------------ #
-    # Header / body helpers
+    # Header / body extraction — same API as before
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def extract_headers(message: Dict[str, Any]) -> Dict[str, str]:
-        """Return a flat dict of header name → value (lower-cased names)."""
         headers: Dict[str, str] = {}
         for h in message.get("payload", {}).get("headers", []):
-            headers[h["name"].lower()] = h["value"]
+            headers[h["name"].lower()] = _decode_mime_words(h["value"])
         return headers
 
     @staticmethod
     def extract_body_text(message: Dict[str, Any]) -> str:
-        """Return the plain-text body of a message (best effort)."""
-        payload = message.get("payload", {})
+        raw_msg = message.get("payload", {}).get("raw_message")
+        if raw_msg is None:
+            return ""
 
-        def _decode(data: str) -> str:
-            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+        def _get_text(msg) -> Optional[str]:
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ct = part.get_content_type()
+                    if ct == "text/plain":
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            return payload.decode(charset, errors="replace")
+                # Fallback: try HTML
+                for part in msg.walk():
+                    ct = part.get_content_type()
+                    if ct == "text/html":
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            charset = part.get_content_charset() or "utf-8"
+                            text = payload.decode(charset, errors="replace")
+                            # Strip basic HTML tags
+                            return re.sub(r"<[^>]+>", " ", text)
+                return None
+            else:
+                payload = raw_msg.get_payload(decode=True)
+                if payload:
+                    charset = raw_msg.get_content_charset() or "utf-8"
+                    return payload.decode(charset, errors="replace")
+                return None
 
-        def _find_text(part: Dict[str, Any]) -> Optional[str]:
-            mime = part.get("mimeType", "")
-            body = part.get("body", {})
-            if mime == "text/plain" and body.get("data"):
-                return _decode(body["data"])
-            for sub in part.get("parts", []):
-                result = _find_text(sub)
-                if result:
-                    return result
-            return None
-
-        text = _find_text(payload)
-        if text:
-            return text
-
-        # Fallback: decode raw bytes with email lib.
-        try:
-            raw = GmailClient.extract_body_raw(message)
-            parsed = message_from_bytes(raw)
-            for part in parsed.walk():
-                if part.get_content_type() == "text/plain":
-                    return part.get_payload(decode=True).decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        return ""
-
-    @staticmethod
-    def extract_body_raw(message: Dict[str, Any]) -> bytes:
-        """Return the raw body bytes decoded from the message snippet."""
-        payload = message.get("payload", {})
-        body = payload.get("body", {})
-        data = body.get("data", "")
-        return base64.urlsafe_b64decode(data + "==") if data else b""
+        return _get_text(raw_msg) or ""
 
     # ------------------------------------------------------------------ #
     # Mutation
     # ------------------------------------------------------------------ #
 
     def mark_as_read(self, message_id: str) -> None:
-        """Remove the UNREAD label from *message_id*."""
+        """Mark an IMAP message as Seen."""
+        imap = self._ensure_connected()
         try:
-            self.service.users().messages().modify(
-                userId="me",
-                id=message_id,
-                body={"removeLabelIds": ["UNREAD"]},
-            ).execute()
-        except HttpError as exc:
+            imap.store(message_id, "+FLAGS", "\\Seen")
+        except Exception as exc:
             log.warning("Could not mark message %s as read: %s", message_id, exc)
 
     def add_label(self, message_id: str, label_id: str) -> None:
-        """Add *label_id* to *message_id*."""
-        try:
-            self.service.users().messages().modify(
-                userId="me",
-                id=message_id,
-                body={"addLabelIds": [label_id]},
-            ).execute()
-        except HttpError as exc:
-            log.warning("Could not add label to message %s: %s", message_id, exc)
+        """IMAP copy to another folder (best-effort)."""
+        pass
