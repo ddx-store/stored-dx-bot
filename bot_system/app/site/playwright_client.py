@@ -30,7 +30,7 @@ log = get_logger(__name__)
 
 GLOBAL_TIMEOUT = 180
 
-_NAV_TIMEOUT = 8_000
+_NAV_TIMEOUT = 15_000
 _SPA_WAIT = 2.0
 _SHORT_WAIT = 0.8
 
@@ -38,15 +38,36 @@ _STEALTH_JS = """
 () => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-    window.navigator.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
+    delete navigator.__proto__.webdriver;
+
+    window.navigator.chrome = {
+        runtime: { onConnect: undefined, onMessage: undefined, id: undefined },
+        loadTimes: function(){ return {}; },
+        csi: function(){ return {}; },
+        app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+    };
 
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ar'] });
     Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5].map(() => ({
-            name: 'Chrome PDF Plugin',
-            filename: 'internal-pdf-viewer',
-            description: 'Portable Document Format',
-        })),
+        get: () => {
+            const plugins = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            plugins.refresh = () => {};
+            return plugins;
+        },
+    });
+    Object.defineProperty(navigator, 'mimeTypes', {
+        get: () => {
+            const types = [
+                { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+                { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+            ];
+            types.refresh = () => {};
+            return types;
+        },
     });
 
     const originalQuery = window.navigator.permissions.query;
@@ -59,6 +80,11 @@ _STEALTH_JS = """
     Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
     Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+
+    Object.defineProperty(navigator, 'connection', {
+        get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false }),
+    });
 
     const getParameter = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function(parameter) {
@@ -66,6 +92,26 @@ _STEALTH_JS = """
         if (parameter === 37446) return 'Intel Iris OpenGL Engine';
         return getParameter.call(this, parameter);
     };
+
+    if (typeof WebGL2RenderingContext !== 'undefined') {
+        const getParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(parameter) {
+            if (parameter === 37445) return 'Intel Inc.';
+            if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+            return getParam2.call(this, parameter);
+        };
+    }
+
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(type) {
+        if (this.width === 0 && this.height === 0) return origToDataURL.apply(this, arguments);
+        return origToDataURL.apply(this, arguments);
+    };
+
+    window.Notification = window.Notification || { permission: 'default' };
+
+    Object.defineProperty(document, 'hidden', { get: () => false });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible' });
 }
 """
 
@@ -189,7 +235,7 @@ class PlaywrightClient:
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
+                    "Chrome/134.0.0.0 Safari/537.36"
                 ),
                 viewport={"width": 1920, "height": 1080},
                 locale="en-US",
@@ -199,7 +245,7 @@ class PlaywrightClient:
                 bypass_csp=True,
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-                    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    "sec-ch-ua": '"Google Chrome";v="134", "Chromium";v="134", "Not_A Brand";v="24"',
                     "sec-ch-ua-mobile": "?0",
                     "sec-ch-ua-platform": '"Windows"',
                 },
@@ -1276,50 +1322,64 @@ class PlaywrightClient:
         has_path = parsed.path not in ("", "/")
         base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-        if has_path:
+        _LOGIN_PATHS = ["/auth/login", "/login", "/signin", "/sign-in", "/auth/signin"]
+        is_login_url = has_path and any(parsed.path.rstrip("/").lower().endswith(lp.rstrip("/")) for lp in _LOGIN_PATHS)
+
+        if has_path and not is_login_url:
             if await self._try_url_smart(page, site_url):
                 return True
 
-        homepage_loaded = await self._load_homepage(page, base_url)
+        for attempt in range(2):
+            if attempt > 0:
+                self._report("إعادة المحاولة...")
+                await asyncio.sleep(3)
 
-        if homepage_loaded:
-            if await self._has_fillable_form(page, require_register_context=True):
-                return True
+            homepage_loaded = await self._load_homepage(page, base_url)
 
-            signup_btn_texts = [
-                "sign up for free", "sign up", "signup", "register",
-                "create account", "get started", "إنشاء حساب",
-                "سجل الآن", "سجل", "تسجيل",
-            ]
-            for text in signup_btn_texts:
-                try:
-                    btn = page.get_by_text(text, exact=False).first
-                    if await btn.is_visible(timeout=400):
-                        await btn.click()
-                        await asyncio.sleep(2)
+            if homepage_loaded:
+                if await self._has_fillable_form(page, require_register_context=True):
+                    return True
+
+                signup_btn_texts = [
+                    "sign up for free", "sign up", "signup", "register",
+                    "create account", "get started", "إنشاء حساب",
+                    "سجل الآن", "سجل", "تسجيل",
+                ]
+                for text in signup_btn_texts:
+                    try:
+                        btn = page.get_by_text(text, exact=False).first
+                        if await btn.is_visible(timeout=400):
+                            await btn.click()
+                            await asyncio.sleep(2)
+                            await self._wait_for_spa(page)
+                            await self._wait_for_cf(page, max_wait=10)
+                            if await self._has_fillable_form(page):
+                                return True
+                            if await self._has_email_only_form(page):
+                                return True
+                            break
+                    except Exception:
+                        continue
+
+                register_link = await self._find_register_link(page)
+                if register_link:
+                    try:
+                        await register_link.click()
+                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
                         await self._wait_for_spa(page)
-                        if await self._has_fillable_form(page):
+                        if await self._click_register_tab(page):
+                            await asyncio.sleep(1)
+                            if await self._has_fillable_form(page):
+                                return True
+                        elif await self._has_fillable_form(page, require_register_context=True):
                             return True
-                        if await self._has_email_only_form(page):
-                            return True
-                        break
-                except Exception:
-                    continue
+                    except Exception:
+                        pass
+                break
 
-            register_link = await self._find_register_link(page)
-            if register_link:
-                try:
-                    await register_link.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=8000)
-                    await self._wait_for_spa(page)
-                    if await self._click_register_tab(page):
-                        await asyncio.sleep(1)
-                        if await self._has_fillable_form(page):
-                            return True
-                    elif await self._has_fillable_form(page, require_register_context=True):
-                        return True
-                except Exception:
-                    pass
+        if is_login_url:
+            if await self._try_url_smart(page, site_url):
+                return True
 
         for path in _REGISTER_PATHS:
             url = urljoin(base_url + "/", path)
@@ -1345,7 +1405,7 @@ class PlaywrightClient:
             status = resp.status if resp else 0
             if status == 403 or status == 503:
                 self._report("حماية Cloudflare -- جاري المحاولة...")
-                cf_ok = await self._wait_for_cf(page, max_wait=12)
+                cf_ok = await self._wait_for_cf(page, max_wait=20)
                 if not cf_ok:
                     return False
             elif status >= 400:
@@ -1418,7 +1478,7 @@ class PlaywrightClient:
             status = resp.status if resp else 0
 
             if status == 403 or status == 503:
-                cf_ok = await self._wait_for_cf(page, max_wait=6)
+                cf_ok = await self._wait_for_cf(page, max_wait=15)
                 if not cf_ok:
                     log.debug("CF block at %s (status=%s)", url, status)
                     return False
