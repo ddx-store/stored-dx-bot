@@ -487,6 +487,9 @@ class PlaywrightClient:
             await asyncio.sleep(2)
             await self._wait_for_spa(page)
 
+            log.info("-> Profile step %d: URL=%s", step, page.url[:120])
+            await self._dump_page_elements(page)
+
             new_inputs = await self._wait_for_inputs(page, max_wait=6)
             if new_inputs == 0:
                 body = ""
@@ -593,6 +596,59 @@ class PlaywrightClient:
             message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
             page_url=page.url,
         )
+
+    async def _dump_page_elements(self, page):
+        try:
+            body_text = ""
+            try:
+                body_text = (await page.inner_text("body"))[:300]
+            except Exception:
+                pass
+            log.info("-> Page body preview: %s", body_text.replace("\n", " | ")[:300])
+
+            inputs = await page.query_selector_all("input")
+            for inp in inputs:
+                try:
+                    visible = await inp.is_visible()
+                    if not visible:
+                        continue
+                    inp_type = (await inp.get_attribute("type") or "text").lower()
+                    if inp_type in ("hidden", "submit", "button"):
+                        continue
+                    name = await inp.get_attribute("name") or ""
+                    inp_id = await inp.get_attribute("id") or ""
+                    placeholder = await inp.get_attribute("placeholder") or ""
+                    autocomplete = await inp.get_attribute("autocomplete") or ""
+                    aria = await inp.get_attribute("aria-label") or ""
+                    val = await inp.input_value()
+                    log.info("-> INPUT: type=%s name=%s id=%s ph=%s auto=%s aria=%s val=%s",
+                             inp_type, name, inp_id, placeholder[:30], autocomplete, aria[:30], val[:20])
+                except Exception:
+                    continue
+
+            selects = await page.query_selector_all("select")
+            for sel in selects:
+                try:
+                    if await sel.is_visible():
+                        name = await sel.get_attribute("name") or ""
+                        sel_id = await sel.get_attribute("id") or ""
+                        aria = await sel.get_attribute("aria-label") or ""
+                        opts = await sel.query_selector_all("option")
+                        log.info("-> SELECT: name=%s id=%s aria=%s options=%d", name, sel_id, aria[:30], len(opts))
+                except Exception:
+                    continue
+
+            buttons = await page.query_selector_all("button")
+            for btn in buttons:
+                try:
+                    if await btn.is_visible():
+                        text = (await btn.inner_text())[:50]
+                        btn_type = await btn.get_attribute("type") or ""
+                        log.info("-> BUTTON: type=%s text=%s", btn_type, text.replace("\n", " "))
+                except Exception:
+                    continue
+        except Exception as exc:
+            log.debug("Dump page error: %s", exc)
 
     async def _try_fill_date_picker(self, page) -> int:
         filled = 0
