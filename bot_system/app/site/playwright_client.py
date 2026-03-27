@@ -87,7 +87,10 @@ class PlaywrightClient:
         username = fake_username(email)
         phone = f"05{random.randint(10000000, 99999999)}"
 
-        async with async_playwright() as pw:
+        browser = None
+        pw_instance = None
+        try:
+            pw_instance = await async_playwright().start()
             chromium_path = shutil.which("chromium")
             launch_args = {
                 "headless": True,
@@ -98,33 +101,41 @@ class PlaywrightClient:
             if chromium_path:
                 launch_args["executable_path"] = chromium_path
 
-            browser = await pw.chromium.launch(**launch_args)
+            browser = await pw_instance.chromium.launch(**launch_args)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
+            page = await context.new_page()
+
+            api_responses = []
+            page.on("response", lambda r: api_responses.append(
+                (r.status, r.url, r.request.method)
+            ) if "/api/" in r.url or r.request.method == "POST" else None)
+
+            result = await asyncio.wait_for(
+                self._do_register(page, site_url, email, password,
+                                  first, last, username, phone, api_responses),
+                timeout=GLOBAL_TIMEOUT,
+            )
+            return result
+        except asyncio.TimeoutError:
+            log.error("Global timeout (%ds) reached for %s", GLOBAL_TIMEOUT, site_url)
+            return RegistrationResult(False, message=f"انتهى الوقت ({GLOBAL_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل")
+        except Exception as exc:
+            log.error("Playwright error: %s", exc)
+            return RegistrationResult(False, message=f"خطأ: {exc}")
+        finally:
             try:
-                context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 800},
-                )
-                page = await context.new_page()
-
-                api_responses = []
-                page.on("response", lambda r: api_responses.append(
-                    (r.status, r.url, r.request.method)
-                ) if "/api/" in r.url or r.request.method == "POST" else None)
-
-                result = await asyncio.wait_for(
-                    self._do_register(page, site_url, email, password,
-                                      first, last, username, phone, api_responses),
-                    timeout=GLOBAL_TIMEOUT,
-                )
-                return result
-            except asyncio.TimeoutError:
-                log.error("Global timeout (%ds) reached for %s", GLOBAL_TIMEOUT, site_url)
-                return RegistrationResult(False, message=f"انتهى الوقت ({GLOBAL_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل")
-            except Exception as exc:
-                log.error("Playwright error: %s", exc)
-                return RegistrationResult(False, message=f"خطأ: {exc}")
-            finally:
-                await browser.close()
+                if browser:
+                    await asyncio.wait_for(browser.close(), timeout=5)
+            except Exception:
+                log.warning("Browser close timed out, forcing kill")
+            try:
+                if pw_instance:
+                    await asyncio.wait_for(pw_instance.stop(), timeout=5)
+            except Exception:
+                log.warning("Playwright stop timed out")
 
     async def _do_register(self, page, site_url, email, password,
                            first, last, username, phone, api_responses):

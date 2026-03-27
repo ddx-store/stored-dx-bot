@@ -46,20 +46,27 @@ def get_bot() -> Bot:
 
 
 def send_message(chat_id: int, text: str) -> None:
-    """Send a message from any thread — routes through the main PTB event loop."""
+    """Send a message from any thread — routes through the main PTB event loop.
+    
+    Tries Markdown first, falls back to plain text if Markdown parsing fails.
+    """
     bot = get_bot()
-    coro = bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-    if _main_loop is not None and _main_loop.is_running():
-        future = asyncio.run_coroutine_threadsafe(coro, _main_loop)
+    for parse_mode in ("Markdown", None):
+        coro = bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
         try:
-            future.result(timeout=10)
+            if _main_loop is not None and _main_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(coro, _main_loop)
+                future.result(timeout=15)
+            else:
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+            return
         except Exception as exc:
-            log.error("send_message failed (threadsafe): %s", exc)
-    else:
-        try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(coro)
-            loop.close()
-        except Exception as exc:
-            log.error("send_message failed (new loop): %s", exc)
+            if parse_mode == "Markdown":
+                log.warning("send_message Markdown failed, retrying plain: %s", exc)
+                continue
+            log.error("send_message failed completely: %s", exc)

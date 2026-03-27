@@ -74,9 +74,16 @@ class RegistrationService:
                 self._finish(job, result.message or "✅ تم إنشاء الحساب")
 
         except Exception as exc:
-            log.error("Job %s FAILED: %s\n%s", job.job_id, exc, traceback.format_exc())
-            self._jobs.fail(job.job_id, str(exc))
-            self._notify.step(job, "❌", f"فشل: {exc}")
+            msg = str(exc)[:200]
+            log.error("Job %s FAILED: %s\n%s", job.job_id, msg, traceback.format_exc())
+            try:
+                self._jobs.fail(job.job_id, msg)
+            except Exception:
+                log.error("Failed to update job status for %s", job.job_id)
+            try:
+                self._notify.step(job, "❌", f"فشل: {msg}")
+            except Exception as notify_exc:
+                log.error("CRITICAL: Could not notify user about failure: %s", notify_exc)
 
     def _handle_otp(self, job: Job) -> None:
         self._jobs.transition(job.job_id, JobStatus.WAITING_FOR_OTP)
