@@ -243,10 +243,19 @@ class PaymentClient:
 
         await self._wait_for_cf(page)
 
-        for _ in range(3):
+        for attempt in range(4):
             email_input = await self._find_input(page, ["email", "username", "login", "identifier"])
             if email_input:
                 break
+
+            clicked = await self._click_email_login_link(page)
+            if clicked:
+                await asyncio.sleep(1.5)
+                await self._wait_spa(page)
+                email_input = await self._find_input(page, ["email", "username", "login", "identifier"])
+                if email_input:
+                    break
+
             for text in _LOGIN_BUTTON_TEXTS:
                 try:
                     btn = page.get_by_text(text, exact=False).first
@@ -549,6 +558,38 @@ class PaymentClient:
         for kw in success_kw:
             if kw in body:
                 return True
+
+        return False
+
+    async def _click_email_login_link(self, page) -> bool:
+        email_link_texts = [
+            "continue with email", "log in with email",
+            "sign in with email", "use email",
+            "use email instead", "email address",
+            "continue with your email",
+        ]
+        for text in email_link_texts:
+            try:
+                link = page.get_by_text(text, exact=False).first
+                if await link.is_visible(timeout=400):
+                    await link.click()
+                    log.info("Clicked '%s' to reveal email input", text)
+                    return True
+            except Exception:
+                continue
+
+        for sel in [
+            'button:has-text("email")', 'a:has-text("email")',
+            '[data-testid*="email"]', '[aria-label*="email" i]',
+        ]:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=400):
+                    await btn.click()
+                    log.info("Clicked email button via selector: %s", sel)
+                    return True
+            except Exception:
+                continue
 
         return False
 
