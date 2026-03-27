@@ -518,11 +518,27 @@ class PlaywrightClient:
                     page_url=page.url,
                 )
 
+            date_filled = await self._try_fill_date_picker(page)
+
             filled_count = await self._smart_fill(
                 page, email, password, first, last, username, phone
             )
+            filled_count += date_filled
 
             if filled_count == 0:
+                continue_btn = await self._find_continue_button(page)
+                if continue_btn:
+                    self._report(f"إكمال الملف الشخصي -- الخطوة {step} (متابعة)...")
+                    before_url = page.url
+                    try:
+                        await continue_btn.click()
+                        await asyncio.sleep(3)
+                        await self._wait_for_spa(page)
+                        if page.url.rstrip("/") != before_url.rstrip("/"):
+                            continue
+                    except Exception:
+                        pass
+
                 skip_btn = await self._find_skip_button(page)
                 if skip_btn:
                     try:
@@ -577,6 +593,114 @@ class PlaywrightClient:
             message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
             page_url=page.url,
         )
+
+    async def _try_fill_date_picker(self, page) -> int:
+        filled = 0
+        try:
+            selects = await page.query_selector_all("select")
+            visible_selects = []
+            for sel in selects:
+                try:
+                    if await sel.is_visible():
+                        visible_selects.append(sel)
+                except Exception:
+                    continue
+
+            if len(visible_selects) >= 3:
+                for sel in visible_selects:
+                    sel_name = (await sel.get_attribute("name") or "").lower()
+                    sel_id = (await sel.get_attribute("id") or "").lower()
+                    sel_aria = (await sel.get_attribute("aria-label") or "").lower()
+                    sel_hint = f"{sel_name} {sel_id} {sel_aria}"
+                    options = await sel.query_selector_all("option")
+                    option_count = len(options)
+
+                    try:
+                        if any(k in sel_hint for k in ["month", "شهر"]):
+                            await sel.select_option(index=min(6, option_count - 1))
+                            filled += 1
+                        elif any(k in sel_hint for k in ["day", "يوم"]):
+                            await sel.select_option(index=min(15, option_count - 1))
+                            filled += 1
+                        elif any(k in sel_hint for k in ["year", "سنة"]):
+                            for opt in options:
+                                val = await opt.get_attribute("value")
+                                text = await opt.inner_text()
+                                if val and ("1995" in str(val) or "1995" in text):
+                                    await sel.select_option(val)
+                                    filled += 1
+                                    break
+                            else:
+                                mid = max(1, option_count // 3)
+                                val = await options[mid].get_attribute("value")
+                                if val:
+                                    await sel.select_option(val)
+                                    filled += 1
+                    except Exception:
+                        continue
+
+            if filled == 0:
+                date_input = page.locator(
+                    'input[type="date"], '
+                    'input[name*="birth" i], input[name*="dob" i], '
+                    'input[name*="birthday" i], input[id*="birth" i], '
+                    'input[id*="dob" i], input[placeholder*="birth" i], '
+                    'input[placeholder*="MM/DD" i], input[placeholder*="DD/MM" i], '
+                    'input[placeholder*="YYYY" i]'
+                ).first
+                try:
+                    if await date_input.is_visible(timeout=500):
+                        await date_input.click()
+                        await asyncio.sleep(0.2)
+                        await date_input.fill("06/15/1995")
+                        await asyncio.sleep(0.2)
+                        try:
+                            await date_input.evaluate(
+                                '(el) => { el.value = "1995-06-15"; '
+                                'el.dispatchEvent(new Event("input", {bubbles:true})); '
+                                'el.dispatchEvent(new Event("change", {bubbles:true})); }'
+                            )
+                        except Exception:
+                            pass
+                        filled += 1
+                        log.info("-> Filled date picker: 1995-06-15")
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            log.debug("Date picker fill error: %s", exc)
+
+        if filled > 0:
+            log.info("-> Date picker: filled %d components", filled)
+        return filled
+
+    async def _find_continue_button(self, page):
+        continue_texts = [
+            "continue", "next", "submit", "done", "finish",
+            "complete", "save", "agree", "accept", "confirm",
+            "متابعة", "التالي", "إرسال", "حفظ", "إنهاء", "موافق",
+            "get started", "let's go", "start", "proceed",
+        ]
+        for text in continue_texts:
+            try:
+                btn = page.locator(
+                    f'button:has-text("{text}"), '
+                    f'[role="button"]:has-text("{text}")'
+                ).first
+                if await btn.is_visible(timeout=500):
+                    return btn
+            except Exception:
+                continue
+
+        for sel in ['button[type="submit"]', 'input[type="submit"]']:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    return btn
+            except Exception:
+                continue
+
+        return None
 
     async def _find_skip_button(self, page):
         skip_texts = [
@@ -1092,6 +1216,15 @@ class PlaywrightClient:
                 count += 1
             except Exception:
                 continue
+
+        selects = await page.query_selector_all("select")
+        for sel in selects:
+            try:
+                if await sel.is_visible():
+                    count += 1
+            except Exception:
+                continue
+
         return count
 
     async def _has_email_only_form(self, page) -> bool:
@@ -1224,7 +1357,16 @@ class PlaywrightClient:
                 if inp_type == "checkbox" or inp_type == "radio":
                     continue
 
-                if inp_type == "email" or "email" in hint or "mail" in hint:
+                if inp_type == "date" or any(k in hint for k in [
+                    "birth", "dob", "age", "تاريخ", "birthday",
+                    "date_of_birth", "date-of-birth", "dateofbirth",
+                    "bday", "born",
+                ]):
+                    if "dob" not in filled_types:
+                        await self._fill_field(inp, "1995-06-15")
+                        filled.append("dob=1995-06-15")
+                        filled_types.add("dob")
+                elif inp_type == "email" or "email" in hint or "mail" in hint:
                     if "email" not in filled_types:
                         await self._fill_field(inp, email)
                         filled.append(f"email={email}")
@@ -1267,9 +1409,6 @@ class PlaywrightClient:
                     await self._fill_field(inp, username)
                     filled.append(f"username={username}")
                     filled_types.add("username")
-                elif any(k in hint for k in ["birth", "dob", "age", "تاريخ"]):
-                    await self._fill_field(inp, "1995-06-15")
-                    filled.append("dob=1995-06-15")
                 elif any(k in hint for k in ["address", "عنوان"]):
                     await self._fill_field(inp, "123 Main Street")
                     filled.append("address=123 Main Street")
@@ -1282,6 +1421,9 @@ class PlaywrightClient:
                 elif any(k in hint for k in ["country", "بلد"]):
                     await self._fill_field(inp, "Saudi Arabia")
                     filled.append("country=SA")
+                else:
+                    log.info("-> Unmatched input: type=%s name=%s id=%s placeholder=%s autocomplete=%s",
+                             inp_type, name, inp_id, placeholder, autocomplete)
             except Exception as exc:
                 log.debug("Fill skip: %s", exc)
 
@@ -1297,13 +1439,42 @@ class PlaywrightClient:
         selects = await page.query_selector_all("select")
         for sel in selects:
             try:
-                if await sel.is_visible():
-                    options = await sel.query_selector_all("option")
-                    if len(options) > 1:
-                        val = await options[1].get_attribute("value")
+                if not await sel.is_visible():
+                    continue
+                sel_name = (await sel.get_attribute("name") or "").lower()
+                sel_id = (await sel.get_attribute("id") or "").lower()
+                sel_aria = (await sel.get_attribute("aria-label") or "").lower()
+                sel_hint = f"{sel_name} {sel_id} {sel_aria}"
+
+                options = await sel.query_selector_all("option")
+                if len(options) <= 1:
+                    continue
+
+                if any(k in sel_hint for k in ["month", "شهر", "mm"]):
+                    await sel.select_option(index=6)
+                    filled.append("select_month=June")
+                elif any(k in sel_hint for k in ["day", "يوم", "dd"]):
+                    await sel.select_option(index=15)
+                    filled.append("select_day=15")
+                elif any(k in sel_hint for k in ["year", "سنة", "yyyy"]):
+                    for opt in options:
+                        val = await opt.get_attribute("value")
+                        text = await opt.inner_text()
+                        if val and ("1995" in str(val) or "1995" in text):
+                            await sel.select_option(val)
+                            filled.append("select_year=1995")
+                            break
+                    else:
+                        mid = len(options) // 2
+                        val = await options[mid].get_attribute("value")
                         if val:
                             await sel.select_option(val)
-                            filled.append(f"select={val}")
+                            filled.append(f"select_year={val}")
+                else:
+                    val = await options[1].get_attribute("value")
+                    if val:
+                        await sel.select_option(val)
+                        filled.append(f"select={val}")
             except Exception:
                 pass
 
