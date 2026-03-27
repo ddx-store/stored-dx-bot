@@ -1,6 +1,5 @@
 """
 Pure-Python dataclasses representing the data model.
-These are decoupled from SQLite so the repository layer can map rows freely.
 """
 
 from __future__ import annotations
@@ -17,13 +16,13 @@ from app.core.utils import utcnow
 class Job:
     job_id: str
     email: str
+    site_url: str = ""
     status: JobStatus = JobStatus.PENDING
     created_at: datetime = field(default_factory=utcnow)
     updated_at: datetime = field(default_factory=utcnow)
     error_msg: Optional[str] = None
     otp_attempts: int = 0
     final_result: Optional[str] = None
-    # Telegram context — used to push status updates.
     chat_id: Optional[int] = None
     message_id: Optional[int] = None
 

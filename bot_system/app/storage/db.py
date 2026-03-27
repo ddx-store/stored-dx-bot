@@ -1,9 +1,5 @@
 """
 SQLite database initialisation.
-
-Creates all tables on first run and exposes a connection factory used by
-the repository layer. The path is taken from config so it can be
-overridden in tests.
 """
 
 from __future__ import annotations
@@ -24,6 +20,7 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS jobs (
     job_id       TEXT PRIMARY KEY,
     email        TEXT NOT NULL,
+    site_url     TEXT NOT NULL DEFAULT '',
     status       TEXT NOT NULL DEFAULT 'pending',
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
@@ -38,31 +35,31 @@ CREATE INDEX IF NOT EXISTS idx_jobs_email  ON jobs (email);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs (status);
 
 CREATE TABLE IF NOT EXISTS otp_messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id          TEXT REFERENCES jobs(job_id),
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id           TEXT REFERENCES jobs(job_id),
     gmail_message_id TEXT NOT NULL UNIQUE,
-    sender          TEXT,
-    subject         TEXT,
-    recipient       TEXT,
-    received_at     TEXT,
-    otp_value       TEXT,
-    otp_type        TEXT,
-    link_value      TEXT,
-    processed       INTEGER NOT NULL DEFAULT 0,
-    processed_at    TEXT,
-    matched         INTEGER NOT NULL DEFAULT 0
+    sender           TEXT,
+    subject          TEXT,
+    recipient        TEXT,
+    received_at      TEXT,
+    otp_value        TEXT,
+    otp_type         TEXT,
+    link_value       TEXT,
+    processed        INTEGER NOT NULL DEFAULT 0,
+    processed_at     TEXT,
+    matched          INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_otp_job    ON otp_messages (job_id);
-CREATE INDEX IF NOT EXISTS idx_otp_gmail  ON otp_messages (gmail_message_id);
-CREATE INDEX IF NOT EXISTS idx_otp_rcpt   ON otp_messages (recipient);
+CREATE INDEX IF NOT EXISTS idx_otp_job   ON otp_messages (job_id);
+CREATE INDEX IF NOT EXISTS idx_otp_gmail ON otp_messages (gmail_message_id);
+CREATE INDEX IF NOT EXISTS idx_otp_rcpt  ON otp_messages (recipient);
 
 CREATE TABLE IF NOT EXISTS results (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id      TEXT REFERENCES jobs(job_id),
-    success     INTEGER NOT NULL,
-    detail      TEXT,
-    created_at  TEXT NOT NULL
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT REFERENCES jobs(job_id),
+    success    INTEGER NOT NULL,
+    detail     TEXT,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -76,6 +73,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_audit_job ON audit_logs (job_id);
 """
 
+# Migration: add site_url column to existing databases that don't have it.
+_MIGRATIONS = [
+    "ALTER TABLE jobs ADD COLUMN site_url TEXT NOT NULL DEFAULT ''",
+]
+
 
 def _ensure_dir(path: str) -> None:
     directory = os.path.dirname(path)
@@ -84,7 +86,6 @@ def _ensure_dir(path: str) -> None:
 
 
 def get_connection(path: str | None = None) -> sqlite3.Connection:
-    """Open (and configure) an SQLite connection to *path*."""
     db_path = path or config.DB_PATH
     _ensure_dir(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -95,13 +96,20 @@ def get_connection(path: str | None = None) -> sqlite3.Connection:
 
 
 def init_db(path: str | None = None) -> None:
-    """Create all tables if they do not exist."""
+    """Create all tables if they do not exist, then run pending migrations."""
     db_path = path or config.DB_PATH
     _ensure_dir(db_path)
     conn = get_connection(db_path)
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
+        # Run migrations (ignore errors for already-applied ones).
+        for sql in _MIGRATIONS:
+            try:
+                conn.execute(sql)
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         log.info("Database initialised at %s", db_path)
     finally:
         conn.close()

@@ -1,6 +1,5 @@
 """
-Repository layer — all SQLite read/write operations live here.
-Keeps SQL out of business logic and makes it easy to swap storage later.
+Repository layer — all SQLite read/write operations.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     return Job(
         job_id=row["job_id"],
         email=row["email"],
+        site_url=row["site_url"] if "site_url" in row.keys() else "",
         status=JobStatus(row["status"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -60,12 +60,12 @@ class JobRepository:
         self._conn.execute(
             """
             INSERT INTO jobs
-                (job_id, email, status, created_at, updated_at,
+                (job_id, email, site_url, status, created_at, updated_at,
                  error_msg, otp_attempts, final_result, chat_id, message_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                job.job_id, job.email, job.status.value,
+                job.job_id, job.email, job.site_url, job.status.value,
                 now, now,
                 job.error_msg, job.otp_attempts, job.final_result,
                 job.chat_id, job.message_id,
@@ -127,7 +127,6 @@ class OtpMessageRepository:
         self._conn = conn or get_connection()
 
     def save(self, msg: OtpMessage) -> OtpMessage:
-        """Insert or ignore (idempotent by gmail_message_id)."""
         self._conn.execute(
             """
             INSERT OR IGNORE INTO otp_messages
@@ -137,17 +136,11 @@ class OtpMessageRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                msg.job_id,
-                msg.gmail_message_id,
-                msg.sender,
-                msg.subject,
+                msg.job_id, msg.gmail_message_id, msg.sender, msg.subject,
                 msg.recipient,
                 msg.received_at.isoformat() if msg.received_at else None,
-                msg.otp_value,
-                msg.otp_type.value,
-                msg.link_value,
-                int(msg.processed),
-                int(msg.matched),
+                msg.otp_value, msg.otp_type.value, msg.link_value,
+                int(msg.processed), int(msg.matched),
             ),
         )
         self._conn.commit()
@@ -225,9 +218,7 @@ class AuditRepository:
             ).fetchall()
         return [
             AuditLog(
-                id=r["id"],
-                job_id=r["job_id"],
-                event=r["event"],
+                id=r["id"], job_id=r["job_id"], event=r["event"],
                 detail=r["detail"],
                 created_at=datetime.fromisoformat(r["created_at"]),
             )

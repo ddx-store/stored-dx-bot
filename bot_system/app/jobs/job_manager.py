@@ -1,6 +1,5 @@
 """
 Job manager — creates, retrieves, and updates jobs.
-Acts as the single point of truth for job state transitions.
 """
 
 from __future__ import annotations
@@ -26,12 +25,14 @@ class JobManager:
     def create_job(
         self,
         email: str,
+        site_url: str = "",
         chat_id: Optional[int] = None,
         message_id: Optional[int] = None,
     ) -> Job:
         job = Job(
             job_id=new_job_id(),
             email=email,
+            site_url=site_url,
             status=JobStatus.PENDING,
             created_at=utcnow(),
             updated_at=utcnow(),
@@ -39,8 +40,8 @@ class JobManager:
             message_id=message_id,
         )
         self._jobs.create(job)
-        self._audit.log("job_created", f"email={email}", job.job_id)
-        log.info("Job created: job_id=%s email=%s", job.job_id, email)
+        self._audit.log("job_created", f"email={email} site={site_url}", job.job_id)
+        log.info("Job created: job_id=%s email=%s site=%s", job.job_id, email, site_url)
         return job
 
     def get(self, job_id: str) -> Optional[Job]:
