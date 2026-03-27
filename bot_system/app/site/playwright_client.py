@@ -450,7 +450,9 @@ class PlaywrightClient:
                     continue
                 return step_result
 
-            if has_register_api:
+            new_inputs = await self._wait_for_inputs(page, max_wait=8)
+
+            if has_register_api and new_inputs == 0:
                 return RegistrationResult(
                     True,
                     message="تم إنشاء الحساب بنجاح",
@@ -458,13 +460,16 @@ class PlaywrightClient:
                 )
 
             if any(kw in step_result.message for kw in ["تم إنشاء الحساب", "بنجاح"]):
-                return step_result
+                if new_inputs == 0:
+                    return step_result
 
-            new_inputs = await self._wait_for_inputs(page, max_wait=8)
             if new_inputs == 0:
                 if has_api_success:
                     step_result.message = "تم إنشاء الحساب بنجاح"
                 return step_result
+
+            if has_register_api:
+                log.info("-> register API succeeded but %d more inputs found -- continuing", new_inputs)
 
             self._report(f"مرحلة {step + 1} -- ملء حقول إضافية...")
 
@@ -529,15 +534,31 @@ class PlaywrightClient:
             filled_count += date_filled
 
             if filled_count == 0:
+                body_fill = await self._try_fill_by_page_context(page, email, first, last, username, phone)
+                filled_count += body_fill
+
+            if filled_count == 0:
                 continue_btn = await self._find_continue_button(page)
                 if continue_btn:
                     self._report(f"إكمال الملف الشخصي -- الخطوة {step} (متابعة)...")
                     before_url = page.url
+                    before_body = ""
+                    try:
+                        before_body = (await page.inner_text("body"))[:200]
+                    except Exception:
+                        pass
                     try:
                         await continue_btn.click()
                         await asyncio.sleep(3)
                         await self._wait_for_spa(page)
-                        if page.url.rstrip("/") != before_url.rstrip("/"):
+                        url_changed = page.url.rstrip("/") != before_url.rstrip("/")
+                        dom_changed = False
+                        try:
+                            after_body = (await page.inner_text("body"))[:200]
+                            dom_changed = after_body != before_body
+                        except Exception:
+                            pass
+                        if url_changed or dom_changed:
                             continue
                     except Exception:
                         pass
@@ -596,6 +617,164 @@ class PlaywrightClient:
             message="تم إنشاء الحساب وإكمال الملف الشخصي بنجاح",
             page_url=page.url,
         )
+
+    async def _try_fill_by_page_context(self, page, email, first, last, username, phone) -> int:
+        filled = 0
+        try:
+            body = ""
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                return 0
+
+            page_url = page.url.lower()
+
+            inputs = await page.query_selector_all("input")
+            visible_text_inputs = []
+            for inp in inputs:
+                try:
+                    if not await inp.is_visible():
+                        continue
+                    inp_type = (await inp.get_attribute("type") or "text").lower()
+                    if inp_type in ("hidden", "submit", "button", "file",
+                                    "image", "reset", "checkbox", "radio"):
+                        continue
+                    current_val = await inp.input_value()
+                    if current_val and len(current_val) > 2:
+                        continue
+                    visible_text_inputs.append((inp, inp_type))
+                except Exception:
+                    continue
+
+            is_birthday_page = any(kw in body for kw in [
+                "birthday", "date of birth", "birth date", "how old",
+                "your age", "when were you born", "تاريخ الميلاد",
+                "تاريخ ميلادك", "عمرك",
+            ]) or any(kw in page_url for kw in [
+                "about-you", "about_you", "birthday", "dob", "age",
+            ])
+
+            is_name_page = any(kw in body for kw in [
+                "your name", "full name", "first name", "last name",
+                "display name", "what should we call you",
+                "اسمك", "الاسم الكامل",
+            ])
+
+            is_profile_page = any(kw in body for kw in [
+                "tell us about", "about yourself", "complete your profile",
+                "set up your", "personalize", "customize",
+                "أكمل ملفك", "عن نفسك",
+            ]) or "profile" in page_url or "onboard" in page_url
+
+            if is_birthday_page and visible_text_inputs:
+                for inp, inp_type in visible_text_inputs:
+                    try:
+                        if inp_type == "date":
+                            await self._fill_field(inp, "1995-06-15")
+                        else:
+                            await self._fill_field(inp, "06/15/1995")
+                            try:
+                                await inp.evaluate(
+                                    '(el) => { '
+                                    'el.dispatchEvent(new Event("input", {bubbles:true})); '
+                                    'el.dispatchEvent(new Event("change", {bubbles:true})); }'
+                                )
+                            except Exception:
+                                pass
+                        filled += 1
+                        log.info("-> Context fill: birthday=06/15/1995 (page context match)")
+                        break
+                    except Exception:
+                        continue
+
+            if is_name_page and visible_text_inputs:
+                first_filled = False
+                last_filled = False
+                for inp, inp_type in visible_text_inputs:
+                    try:
+                        hint = ""
+                        for attr in ["name", "id", "placeholder", "aria-label", "autocomplete"]:
+                            val = await inp.get_attribute(attr)
+                            if val:
+                                hint += f" {val.lower()}"
+                        if not first_filled and any(k in hint for k in ["first", "given", "fname"]):
+                            await self._fill_field(inp, first)
+                            filled += 1
+                            first_filled = True
+                            log.info("-> Context fill: first=%s (hint match)", first)
+                        elif not last_filled and any(k in hint for k in ["last", "family", "lname", "surname"]):
+                            await self._fill_field(inp, last)
+                            filled += 1
+                            last_filled = True
+                            log.info("-> Context fill: last=%s (hint match)", last)
+                        elif any(k in hint for k in ["display", "full", "name"]) and not first_filled:
+                            await self._fill_field(inp, f"{first} {last}")
+                            filled += 1
+                            first_filled = True
+                            log.info("-> Context fill: full name=%s %s", first, last)
+                    except Exception:
+                        continue
+                if filled == 0 and len(visible_text_inputs) <= 2:
+                    for idx, (inp, inp_type) in enumerate(visible_text_inputs):
+                        try:
+                            if idx == 0:
+                                await self._fill_field(inp, first)
+                                filled += 1
+                                log.info("-> Context fill: first=%s (positional)", first)
+                            elif idx == 1:
+                                await self._fill_field(inp, last)
+                                filled += 1
+                                log.info("-> Context fill: last=%s (positional)", last)
+                        except Exception:
+                            continue
+
+            if filled == 0 and is_profile_page and visible_text_inputs:
+                for inp, inp_type in visible_text_inputs:
+                    try:
+                        parent_text = ""
+                        try:
+                            parent_text = await inp.evaluate(
+                                "(el) => { const p = el.closest('label, fieldset') || el.parentElement; "
+                                "return p ? p.innerText.toLowerCase() : ''; }"
+                            )
+                        except Exception:
+                            pass
+                        hint = ""
+                        for attr in ["name", "id", "placeholder", "aria-label"]:
+                            val = await inp.get_attribute(attr)
+                            if val:
+                                hint += f" {val.lower()}"
+                        combined = f"{parent_text} {hint}"
+
+                        if any(k in combined for k in ["birth", "dob", "age", "birthday", "تاريخ"]):
+                            await self._fill_field(inp, "06/15/1995")
+                            filled += 1
+                            log.info("-> Context fill (parent): birthday")
+                        elif any(k in combined for k in ["name", "اسم"]):
+                            await self._fill_field(inp, f"{first} {last}")
+                            filled += 1
+                            log.info("-> Context fill (parent): name")
+                        elif any(k in combined for k in ["phone", "هاتف", "mobile"]):
+                            await self._fill_field(inp, phone)
+                            filled += 1
+                            log.info("-> Context fill (parent): phone")
+                    except Exception:
+                        continue
+
+            checkboxes = await page.query_selector_all('input[type="checkbox"]')
+            for cb in checkboxes:
+                try:
+                    if await cb.is_visible() and not await cb.is_checked():
+                        await cb.check()
+                        filled += 1
+                        log.info("-> Context fill: checkbox checked")
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            log.debug("Context fill error: %s", exc)
+
+        return filled
 
     async def _dump_page_elements(self, page):
         try:
