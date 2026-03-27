@@ -15,6 +15,7 @@ Global timeout: 50 seconds max for the entire registration.
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import shutil
 from urllib.parse import urljoin, urlparse
@@ -103,7 +104,7 @@ class PlaywrightClient:
         pw_instance = None
         try:
             pw_instance = await async_playwright().start()
-            chromium_path = shutil.which("chromium")
+            chromium_path = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium")
             launch_args = {
                 "headless": True,
                 "args": [

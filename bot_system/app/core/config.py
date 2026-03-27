@@ -1,5 +1,8 @@
 """
 Configuration module — reads all settings from environment variables.
+
+Supports .env files via python-dotenv (loaded in main.py).
+All secrets come from env vars — never hardcoded.
 """
 
 from __future__ import annotations
@@ -32,7 +35,6 @@ def _int(key: str, default: int) -> int:
 
 
 class Config:
-    # ── Telegram ──────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = _require("TELEGRAM_BOT_TOKEN")
     TELEGRAM_ALLOWED_USER_IDS: List[int] = [
         int(uid.strip())
@@ -40,32 +42,24 @@ class Config:
         if uid.strip().isdigit()
     ]
 
-    # ── Fixed password used for all account registrations ─────────────
-    # Change this to any password you want to use on all sites.
     FIXED_PASSWORD: str = _optional("FIXED_PASSWORD", "Hh123456789Hh")
 
-    # ── Gmail — IMAP with App Password ────────────────────────────────
     GMAIL_USER: str = _optional("GMAIL_USER", "")
     GMAIL_APP_PASSWORD: str = _optional("GMAIL_APP_PASSWORD", "")
     GMAIL_OTP_LABEL: str = _optional("GMAIL_OTP_LABEL", "TO_BOT")
 
-    # ── OTP behaviour ─────────────────────────────────────────────────
     OTP_TIMEOUT_SECONDS: int = _int("OTP_TIMEOUT_SECONDS", 120)
     OTP_POLL_INTERVAL_SECONDS: int = _int("OTP_POLL_INTERVAL_SECONDS", 5)
     OTP_MAX_ATTEMPTS: int = _int("OTP_MAX_ATTEMPTS", 3)
 
-    # ── Storage ───────────────────────────────────────────────────────
-    DB_PATH: str = _optional("DB_PATH", "bot_system/data/jobs.db")
+    DB_PATH: str = _optional("DB_PATH", "data/jobs.db")
 
-    # ── Logging ───────────────────────────────────────────────────────
     LOG_LEVEL: str = _optional("LOG_LEVEL", "INFO").upper()
 
-    # ── Network ───────────────────────────────────────────────────────
     HTTP_TIMEOUT_SECONDS: int = _int("HTTP_TIMEOUT_SECONDS", 30)
     HTTP_MAX_RETRIES: int = _int("HTTP_MAX_RETRIES", 3)
     HTTP_RETRY_BACKOFF: float = float(_optional("HTTP_RETRY_BACKOFF", "1.5"))
 
-    # Legacy fields kept for compatibility
     SITE_API_BASE_URL: str = _optional("SITE_API_BASE_URL", "")
     SITE_API_KEY: str = _optional("SITE_API_KEY", "")
     SITE_INTEGRATION_MODE: str = _optional("SITE_INTEGRATION_MODE", "playwright")

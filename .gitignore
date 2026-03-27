@@ -1,49 +1,82 @@
-# See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+*.so
 
-# compiled output
-dist
-tmp
-out-tsc
-*.tsbuildinfo
-.expo
-.expo-shared
+# Virtual environments
+.venv/
+venv/
+env/
+.pythonlibs/
 
-# dependencies
-node_modules
-
-# IDEs and editors
-/.idea
-.project
-.classpath
-.c9/
-*.launch
-.settings/
+# IDE
+.idea/
+.vscode/
 *.sublime-workspace
+*.swp
+*.swo
 
-# IDE - VSCode
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-
-# misc
-/.sass-cache
-/connect.lock
-/coverage
-/libpeerconnection.log
-npm-debug.log
-yarn-error.log
-testem.log
-/typings
-
-# System Files
+# OS
 .DS_Store
 Thumbs.db
 
-.cursor/rules/nx-rules.mdc
-.github/instructions/nx.instructions.md
+# Compiled / build output
+dist/
+tmp/
+out-tsc/
+*.tsbuildinfo
 
-# Replit
+# Dependencies
+node_modules/
+
+# Expo
+.expo/
+.expo-shared/
+
+# Coverage / testing
+/coverage/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Secrets and env files
+.env
+*.env.local
+
+# SQLite databases (ephemeral, recreated on boot)
+*.db
+*.db-wal
+*.db-shm
+
+# Replit-specific (keep in Replit, exclude from GitHub)
+.replit
+replit.md
+replit.nix
 .cache/
 .local/
+.config/
+.upm/
+.replitignore
+.agents/
+attached_assets/
+
+# Replit scaffold (not part of the bot)
+artifacts/
+lib/
+scripts/
+
+# Root-level Node.js scaffold (not needed for the Python bot)
+pnpm-workspace.yaml
+pnpm-lock.yaml
+tsconfig.base.json
+tsconfig.json
+.npmrc
+
+# Logs
+*.log
+npm-debug.log
+yarn-error.log
