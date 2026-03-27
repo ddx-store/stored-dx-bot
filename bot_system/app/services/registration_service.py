@@ -3,13 +3,14 @@ Registration service — orchestrates the full create-account flow.
 
 Uses Playwright with system Chromium for real browser automation.
 Sends real-time step-by-step updates to the user via Telegram.
-Global timeout ensures the user always gets a response within 90 seconds.
+OTP codes are filled directly into the website's verification form.
 """
 
 from __future__ import annotations
 
 import asyncio
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 from app.core.config import config
 from app.core.enums import JobStatus
@@ -23,7 +24,7 @@ from app.storage.repositories import ResultRepository
 
 log = get_logger(__name__)
 
-JOB_TIMEOUT = 90
+JOB_TIMEOUT = 200
 
 
 class RegistrationService:
@@ -45,6 +46,12 @@ class RegistrationService:
             def on_progress(msg: str):
                 self._notify.step(job, "🔄", msg)
 
+            has_gmail = bool(config.GMAIL_USER and config.GMAIL_APP_PASSWORD)
+
+            otp_provider = None
+            if has_gmail:
+                otp_provider = self._make_otp_provider(job, on_progress)
+
             client = PlaywrightClient(timeout=8_000)
             loop = asyncio.new_event_loop()
             try:
@@ -55,6 +62,7 @@ class RegistrationService:
                             email=job.email,
                             password=password,
                             progress_callback=on_progress,
+                            otp_provider=otp_provider,
                         ),
                         timeout=JOB_TIMEOUT,
                     )
@@ -72,10 +80,9 @@ class RegistrationService:
             if not result.success:
                 raise RuntimeError(result.message)
 
-            self._notify.step(job, "3️⃣", "تم ملء النموذج وإرساله")
-
-            if result.needs_otp and config.GMAIL_USER and config.GMAIL_APP_PASSWORD:
-                self._handle_otp(job)
+            if result.needs_otp and not has_gmail:
+                self._notify.step(job, "3️⃣", "تم ملء النموذج وإرساله")
+                self._finish(job, "تم التسجيل -- يحتاج تحقق يدوي (Gmail غير مربوط)")
             else:
                 self._finish(job, result.message or "تم إنشاء الحساب")
 
@@ -91,32 +98,36 @@ class RegistrationService:
             except Exception as notify_exc:
                 log.error("CRITICAL: Could not notify user: %s", notify_exc)
 
-    def _handle_otp(self, job: Job) -> None:
-        self._jobs.transition(job.job_id, JobStatus.WAITING_FOR_OTP)
-        self._notify.step(job, "4️⃣", "بانتظار رمز التحقق من البريد...")
+    def _make_otp_provider(self, job: Job, on_progress):
+        notify = self._notify
+        jobs = self._jobs
 
-        watcher = OtpWatcher()
-        try:
-            otp_msg = watcher.wait_for_otp(job)
-        except OtpTimeout:
-            self._finish(job, "تم الإرسال — لم يصل رمز (انتهى الوقت)")
-            return
+        async def provider():
+            jobs.transition(job.job_id, JobStatus.WAITING_FOR_OTP)
+            notify.step(job, "4️⃣", "بانتظار رمز التحقق من البريد...")
 
-        otp_value = otp_msg.link_value or otp_msg.otp_value
-        if not otp_value:
-            self._finish(job, "وصل إيميل لكن بدون رمز")
-            return
+            loop = asyncio.get_event_loop()
+            watcher = OtpWatcher()
 
-        self._notify.step(job, "5️⃣", "تم استلام الرمز — جاري التحقق...")
-
-        if otp_msg.link_value and otp_msg.link_value.startswith("http"):
             try:
-                import urllib.request
-                urllib.request.urlopen(otp_value, timeout=15)
-            except Exception as exc:
-                log.warning("Link open failed: %s", exc)
+                otp_msg = await loop.run_in_executor(
+                    None, watcher.wait_for_otp, job
+                )
+            except OtpTimeout:
+                log.warning("OTP timeout for job %s", job.job_id)
+                return None
 
-        self._finish(job, f"تم التحقق — الرمز: {otp_value}")
+            otp_code = otp_msg.otp_value
+            otp_link = otp_msg.link_value
+
+            if not otp_code and not otp_link:
+                log.warning("Email received but no OTP/link for job %s", job.job_id)
+                return None
+
+            notify.step(job, "5️⃣", "تم استلام الرمز -- جاري التحقق...")
+            return {"code": otp_code, "link": otp_link}
+
+        return provider
 
     def _finish(self, job: Job, detail: str) -> None:
         self._jobs.complete(job.job_id, detail)

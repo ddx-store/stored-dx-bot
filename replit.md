@@ -78,3 +78,8 @@ All settings via environment variables (see `bot_system/.env.example`):
 - API URL matching uses `urlparse(url).path` only, not query params (avoids false positives)
 - Multi-step forms: `_wait_for_inputs()` polls up to 8s for SPA-rendered inputs between steps
 - Navigation: tries signup buttons first, then register links (avoids clicking login links first)
+- OTP flow: browser stays open after registration, receives code from Gmail, types it into verification form, and submits
+- `_fill_otp_code`: handles single-input OTP fields AND individual digit inputs (maxlength=1)
+- `_open_verification_link`: opens verification links in Playwright browser instead of urllib
+- `otp_provider` callback: async function passed to register(), polls Gmail via thread executor
+- JOB_TIMEOUT=200s, GLOBAL_TIMEOUT=180s to accommodate OTP polling (up to 120s)

@@ -28,7 +28,7 @@ from app.core.utils import fake_first_name, fake_last_name, fake_username
 
 log = get_logger(__name__)
 
-GLOBAL_TIMEOUT = 80
+GLOBAL_TIMEOUT = 180
 
 _NAV_TIMEOUT = 8_000
 _SPA_WAIT = 2.0
@@ -148,7 +148,8 @@ class PlaywrightClient:
         self._progress_callback = None
 
     async def register(self, site_url: str, email: str, password: str,
-                       progress_callback=None) -> RegistrationResult:
+                       progress_callback=None,
+                       otp_provider=None) -> RegistrationResult:
         self._progress_callback = progress_callback
         try:
             from playwright.async_api import async_playwright
@@ -217,6 +218,50 @@ class PlaywrightClient:
                                   first, last, username, phone, api_responses),
                 timeout=GLOBAL_TIMEOUT,
             )
+
+            if result.needs_otp and otp_provider:
+                self._report("بانتظار رمز التحقق من البريد...")
+                try:
+                    otp_data = await otp_provider()
+                    if otp_data:
+                        otp_code = otp_data.get("code")
+                        otp_link = otp_data.get("link")
+
+                        if otp_link and otp_link.startswith("http"):
+                            self._report("فتح رابط التحقق...")
+                            verify_result = await self._open_verification_link(
+                                page, context, otp_link
+                            )
+                            if verify_result and verify_result.success:
+                                return verify_result
+
+                        if otp_code:
+                            self._report(f"إدخال رمز التحقق {otp_code}...")
+                            verify_result = await self._fill_otp_code(
+                                page, otp_code
+                            )
+                            if verify_result:
+                                return verify_result
+
+                        return RegistrationResult(
+                            True,
+                            message=f"تم التسجيل -- الرمز: {otp_code or otp_link}",
+                            page_url=page.url,
+                        )
+                    else:
+                        return RegistrationResult(
+                            True, needs_otp=True,
+                            message="تم التسجيل -- لم يصل رمز التحقق (انتهى الوقت)",
+                            page_url=result.page_url,
+                        )
+                except Exception as exc:
+                    log.warning("OTP flow error: %s", exc)
+                    return RegistrationResult(
+                        True, needs_otp=True,
+                        message=f"تم التسجيل -- خطأ في التحقق: {exc}",
+                        page_url=result.page_url,
+                    )
+
             return result
         except asyncio.TimeoutError:
             log.error("Global timeout (%ds) reached for %s", GLOBAL_TIMEOUT, site_url)
@@ -411,6 +456,177 @@ class PlaywrightClient:
             message="تم إرسال النموذج -- تحقق من النتيجة",
             page_url=page.url
         )
+
+    async def _fill_otp_code(self, page, code: str) -> RegistrationResult | None:
+        await asyncio.sleep(2)
+        await self._wait_for_spa(page)
+
+        otp_selectors = [
+            'input[name*="code" i]', 'input[name*="otp" i]',
+            'input[name*="token" i]', 'input[name*="verification" i]',
+            'input[name*="verify" i]', 'input[autocomplete="one-time-code"]',
+            'input[placeholder*="code" i]', 'input[placeholder*="رمز" i]',
+            'input[aria-label*="code" i]', 'input[aria-label*="verification" i]',
+        ]
+
+        otp_input = None
+        for sel in otp_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=500):
+                    otp_input = loc
+                    break
+            except Exception:
+                continue
+
+        if not otp_input:
+            digit_inputs = page.locator('input[maxlength="1"]')
+            count = await digit_inputs.count()
+            if count >= 4:
+                for i in range(min(count, len(code))):
+                    try:
+                        d = digit_inputs.nth(i)
+                        if await d.is_visible(timeout=300):
+                            await d.fill(code[i])
+                            await asyncio.sleep(0.1)
+                    except Exception:
+                        pass
+                await asyncio.sleep(1)
+                self._report("تم إدخال رمز التحقق")
+                await asyncio.sleep(3)
+                await self._wait_for_spa(page)
+                body = ""
+                try:
+                    body = (await page.inner_text("body")).lower()
+                except Exception:
+                    pass
+                if any(kw in body for kw in _SUCCESS_KEYWORDS):
+                    return RegistrationResult(
+                        True,
+                        message="تم التحقق وإنشاء الحساب بنجاح",
+                        page_url=page.url,
+                    )
+                return RegistrationResult(
+                    True,
+                    message=f"تم إدخال الرمز {code}",
+                    page_url=page.url,
+                )
+
+        if not otp_input:
+            inputs = await page.query_selector_all("input")
+            for inp in inputs:
+                try:
+                    if not await inp.is_visible():
+                        continue
+                    inp_type = (await inp.get_attribute("type") or "text").lower()
+                    if inp_type in ("hidden", "submit", "button", "file",
+                                    "image", "reset", "email", "password"):
+                        continue
+                    otp_input = inp
+                    break
+                except Exception:
+                    continue
+
+        if not otp_input:
+            log.warning("No OTP input found on page %s", page.url[:80])
+            return None
+
+        try:
+            await otp_input.click()
+            await asyncio.sleep(0.2)
+            await otp_input.fill(code)
+            await asyncio.sleep(0.5)
+        except Exception as exc:
+            log.warning("Failed to fill OTP: %s", exc)
+            return None
+
+        self._report("تم إدخال رمز التحقق -- جاري الإرسال...")
+        submitted = await self._smart_submit(page)
+        if not submitted:
+            try:
+                await page.keyboard.press("Enter")
+            except Exception:
+                pass
+
+        await asyncio.sleep(3)
+        await self._wait_for_spa(page)
+
+        body = ""
+        try:
+            body = (await page.inner_text("body")).lower()
+        except Exception:
+            pass
+
+        if any(kw in body for kw in _ERROR_KEYWORDS):
+            return RegistrationResult(
+                False,
+                message="رمز التحقق غير صحيح",
+                page_url=page.url,
+            )
+
+        if any(kw in body for kw in _SUCCESS_KEYWORDS):
+            return RegistrationResult(
+                True,
+                message="تم التحقق وإنشاء الحساب بنجاح",
+                page_url=page.url,
+            )
+
+        return RegistrationResult(
+            True,
+            message=f"تم إدخال الرمز {code} -- تحقق من الحساب",
+            page_url=page.url,
+        )
+
+    async def _open_verification_link(self, page, context, link: str) -> RegistrationResult | None:
+        try:
+            parsed_link = urlparse(link)
+            host = parsed_link.hostname or ""
+            if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1", ""):
+                log.warning("Blocked private verification link: %s", link[:80])
+                return None
+            if host.endswith(".local") or host.startswith("10.") or host.startswith("192.168.") or host.startswith("172."):
+                log.warning("Blocked internal verification link: %s", link[:80])
+                return None
+
+            new_page = await context.new_page()
+            resp = await new_page.goto(link, timeout=15000, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+            await self._wait_for_spa(new_page)
+
+            body = ""
+            try:
+                body = (await new_page.inner_text("body")).lower()
+            except Exception:
+                pass
+
+            if any(kw in body for kw in _SUCCESS_KEYWORDS):
+                self._report("تم التحقق عبر الرابط بنجاح")
+                return RegistrationResult(
+                    True,
+                    message="تم التحقق وإنشاء الحساب بنجاح",
+                    page_url=new_page.url,
+                )
+
+            if any(kw in body for kw in _ERROR_KEYWORDS):
+                return RegistrationResult(
+                    False,
+                    message="رابط التحقق غير صالح أو منتهي",
+                    page_url=new_page.url,
+                )
+
+            status = resp.status if resp else 0
+            if 200 <= status < 400:
+                self._report("تم فتح رابط التحقق")
+                return RegistrationResult(
+                    True,
+                    message="تم فتح رابط التحقق -- تحقق من الحساب",
+                    page_url=new_page.url,
+                )
+
+            return None
+        except Exception as exc:
+            log.warning("Verification link error: %s", exc)
+            return None
 
     async def _wait_for_inputs(self, page, max_wait: float = 8.0) -> int:
         elapsed = 0.0
