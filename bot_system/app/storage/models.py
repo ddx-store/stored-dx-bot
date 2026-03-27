@@ -78,6 +78,8 @@ class PaymentJob:
     final_result: Optional[str] = None
     chat_id: Optional[int] = None
     message_id: Optional[int] = None
+    is_bulk: bool = False
+    card_last4: str = ""
 
 
 @dataclass

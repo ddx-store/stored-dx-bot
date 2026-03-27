@@ -814,11 +814,20 @@ async def _handle_payment_text(update: Update, user_id: int, text: str, payment:
             country = payment.get("billing_country", "US")
             _pending_payment.pop(user_id, None)
             _del_session(user_id)
-            summary_lines = [f"  📦 تم استلام {good_count} بطاقة"]
-            if bad_count:
-                summary_lines.append(f"  ⚠️ {bad_count} بطاقة لم تُتعرف عليها (تم تجاهلها)")
-            summary_lines.append("\n  جاري المعالجة الآن — ستصلك نتيجة كل بطاقة بشكل منفصل\n")
-            await update.message.reply_text("\n".join(summary_lines))
+            card_list = "\n".join(
+                f"  {'  ' if i > 0 else ''}  {i+1}.  ****{c.number[-4:]}"
+                for i, c in enumerate(cards)
+            )
+            warn_line = f"\n  ⚠️  {bad_count} بطاقة غير صحيحة تم تجاهلها" if bad_count else ""
+            await update.message.reply_text(
+                "╔══════════════════════════════╗\n"
+                f"║   📦  {good_count} بطاقات في قائمة التفعيل\n"
+                "╚══════════════════════════════╝\n"
+                f"\n{card_list}\n"
+                f"{warn_line}\n"
+                "\n"
+                "  ستصلك نتيجة كل بطاقة بشكل منفصل\n"
+            )
             await _run_bulk_payment(
                 update,
                 site_url=payment["site_url"],
@@ -1047,21 +1056,12 @@ async def _run_bulk_payment(
             password=password,
             plan_name=plan_name,
             chat_id=chat_id,
-        )
-
-        await update.message.reply_text(
-            f"  ⏳  بطاقة {idx}/{total}: ****{card.number[-4:]}\n"
-            "  جاري التفعيل...\n"
+            is_bulk=True,
+            card_last4=card.number[-4:],
         )
 
         scheduler.submit_payment(pjob, card)
         log.info("Bulk job %s submitted: card %d/%d masked=%s", job_id, idx, total, masked)
-
-    await update.message.reply_text(
-        f"  📦  تم إرسال {total} طلبات دفع\n"
-        "  ستصلك نتيجة كل واحدة بشكل منفصل\n"
-        "  /status للاستعلام عن الحالة\n"
-    )
 
 
 def _parse_card(text: str):

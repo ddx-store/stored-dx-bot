@@ -194,6 +194,8 @@ class NotificationService:
     def step(self, job, icon: str, message: str, is_payment: bool = False) -> None:
         if not job.chat_id:
             return
+        if getattr(job, "is_bulk", False):
+            return
         try:
             progress = _get_progress(job, is_payment=is_payment)
             detected = _detect_step(message, is_payment=progress.is_payment)
@@ -211,7 +213,16 @@ class NotificationService:
         if not job.chat_id:
             return
         try:
+            from app.bot.telegram_client import send_message
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            if getattr(job, "is_bulk", False):
+                last4 = getattr(job, "card_last4", "")
+                card_label = f"****{last4}" if last4 else "البطاقة"
+                send_message(job.chat_id, f"  ✅  {card_label}  —  {message}")
+                _cleanup(job.job_id)
+                return
+
             progress = _get_progress(job)
             progress.is_done = True
             progress.result_text = message
@@ -227,7 +238,16 @@ class NotificationService:
         if not job.chat_id:
             return
         try:
+            from app.bot.telegram_client import send_message
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            if getattr(job, "is_bulk", False):
+                last4 = getattr(job, "card_last4", "")
+                card_label = f"****{last4}" if last4 else "البطاقة"
+                send_message(job.chat_id, f"  ❌  {card_label}  —  {message}")
+                _cleanup(job.job_id)
+                return
+
             progress = _get_progress(job)
             is_payment = progress.is_payment
             progress.is_failed = True
