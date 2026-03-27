@@ -3,6 +3,7 @@ Registration service — orchestrates the full create-account flow.
 
 Uses Playwright with system Chromium for real browser automation.
 Sends real-time step-by-step updates to the user via Telegram.
+Global timeout ensures the user always gets a response within 60 seconds.
 """
 
 from __future__ import annotations
@@ -22,35 +23,40 @@ from app.storage.repositories import ResultRepository
 
 log = get_logger(__name__)
 
+JOB_TIMEOUT = 60
+
 
 class RegistrationService:
     def __init__(self) -> None:
         self._jobs = JobManager()
         self._notify = NotificationService()
         self._results = ResultRepository()
-        self._client = PlaywrightClient(timeout=20_000)
+        self._client = PlaywrightClient(timeout=8_000)
 
     def run_job(self, job: Job, password: str) -> None:
         log.info("▶ START job=%s site=%s email=%s", job.job_id, job.site_url, job.email)
 
         try:
             self._jobs.transition(job.job_id, JobStatus.CREATING_ACCOUNT)
-            self._notify.step(job, "1️⃣", "جاري فتح الموقع...")
+            self._notify.step(job, "1️⃣", f"جاري فتح الموقع `{job.site_url}`...")
 
             if not job.site_url:
                 raise RuntimeError("لم يتم تحديد الموقع")
 
-            self._notify.step(job, "2️⃣", f"البحث عن نموذج التسجيل في `{job.site_url}`")
-
             loop = asyncio.new_event_loop()
             try:
                 result = loop.run_until_complete(
-                    self._client.register(
-                        site_url=job.site_url,
-                        email=job.email,
-                        password=password,
+                    asyncio.wait_for(
+                        self._client.register(
+                            site_url=job.site_url,
+                            email=job.email,
+                            password=password,
+                        ),
+                        timeout=JOB_TIMEOUT,
                     )
                 )
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"انتهى الوقت ({JOB_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل")
             finally:
                 loop.close()
 

@@ -11,6 +11,7 @@ Commands:
 
 from __future__ import annotations
 
+import re
 import traceback
 
 from telegram import Update
@@ -29,6 +30,42 @@ def _is_allowed(user_id: int) -> bool:
     return user_id in config.TELEGRAM_ALLOWED_USER_IDS
 
 
+def _parse_create_args(message_text: str):
+    """Parse /create command — extracts site URL and email from the message.
+
+    Supports:
+      /create site.com email@x.com
+      /create https://site.com/auth/register email@x.com
+      /create https://site.com/register?ref=123 email@x.com
+    """
+    text = message_text.strip()
+    if text.startswith("/create"):
+        text = text[len("/create"):].strip()
+    if text.startswith("@"):
+        text = re.sub(r"^@\S+\s*", "", text)
+
+    email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
+    if not email_match:
+        return None, None
+
+    email = email_match.group(0).lower()
+    remainder = text[:email_match.start()].strip() + " " + text[email_match.end():].strip()
+    remainder = remainder.strip()
+
+    url_match = re.search(r"(https?://\S+)", remainder)
+    if url_match:
+        raw_site = url_match.group(1)
+    else:
+        parts = remainder.split()
+        if parts:
+            raw_site = parts[0]
+        else:
+            return None, email
+
+    raw_site = raw_site.rstrip("/.,;:!?")
+    return raw_site, email
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.info("cmd_start called by user=%s", update.effective_user.id)
     try:
@@ -37,6 +74,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "الأوامر المتاحة:\n\n"
             "  `/create site.com email@example.com`\n"
             "  ← يفتح الموقع وينشئ حساب بالإيميل\n\n"
+            "يقبل روابط طويلة أيضاً:\n"
+            "  `/create https://site.com/auth email@x.com`\n\n"
             "  `/status JOB_ID`\n"
             "  ← حالة العملية\n\n"
             "  `/jobs`\n"
@@ -54,28 +93,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Usage: /create site.com email@example.com
-    """
     user = update.effective_user
-    log.info("cmd_create called by user=%s args=%s", user.id, context.args)
+    log.info("cmd_create called by user=%s text=%s", user.id, update.message.text)
 
     try:
         if not _is_allowed(user.id):
             await update.message.reply_text("⛔ غير مصرح لك باستخدام هذا البوت.")
             return
 
-        args = context.args
-        if not args or len(args) < 2:
+        raw_site, email = _parse_create_args(update.message.text or "")
+
+        if not raw_site or not email:
             await update.message.reply_text(
                 "الاستخدام:\n`/create site.com email@example.com`\n\n"
-                "مثال:\n`/create ddxstore.us myemail@gmail.com`",
+                "أمثلة:\n"
+                "`/create ddxstore.us myemail@gmail.com`\n"
+                "`/create https://site.com/register myemail@gmail.com`",
                 parse_mode="Markdown",
             )
             return
-
-        raw_site = args[0].strip()
-        email = args[1].lower().strip()
 
         if not is_valid_email(email):
             await update.message.reply_text(
@@ -104,7 +140,8 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             f"ID: `{job.job_id}`\n"
             f"الموقع: `{site_url}`\n"
             f"الإيميل: `{email}`\n\n"
-            "سأبلغك بالتقدم فور حدوثه 🔄",
+            "سأبلغك بالتقدم فور حدوثه 🔄\n"
+            "⏱ الحد الأقصى: 60 ثانية",
             parse_mode="Markdown",
         )
         log.info("Reply sent to user for job %s", job.job_id)

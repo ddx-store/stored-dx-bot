@@ -2,22 +2,20 @@
 Scheduler — runs registration jobs in background threads.
 
 Each job gets its own thread so the Telegram bot handler returns
-immediately without blocking. ThreadPoolExecutor caps concurrency
-to avoid hammering the Gmail API.
+immediately without blocking. ThreadPoolExecutor caps concurrency.
+If a job thread crashes unexpectedly, the user gets a notification.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, Future
-from typing import Dict, Optional
+from typing import Dict
 
-from app.core.config import config
 from app.core.logger import get_logger
 from app.storage.models import Job
 
 log = get_logger(__name__)
 
-# Max concurrent registration jobs.
 _MAX_WORKERS = 5
 
 
@@ -27,7 +25,6 @@ class Scheduler:
         self._futures: Dict[str, Future] = {}
 
     def submit(self, job: Job, password: str) -> None:
-        """Dispatch *job* to run in a background thread."""
         from app.services.registration_service import RegistrationService
 
         service = RegistrationService()
@@ -40,6 +37,11 @@ class Scheduler:
             exc = f.exception()
             if exc:
                 log.error("Background job %s raised an uncaught exception: %s", job.job_id, exc)
+                try:
+                    from app.services.notification_service import NotificationService
+                    NotificationService().step(job, "❌", f"خطأ غير متوقع: {exc}")
+                except Exception as notify_exc:
+                    log.error("Failed to notify user about crash: %s", notify_exc)
             self._futures.pop(job.job_id, None)
 
         future.add_done_callback(_on_done)
@@ -52,5 +54,4 @@ class Scheduler:
         self._pool.shutdown(wait=False)
 
 
-# Module-level singleton shared across bot handlers.
 scheduler = Scheduler()

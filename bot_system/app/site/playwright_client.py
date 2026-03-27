@@ -2,11 +2,13 @@
 Generic site automation using Playwright + system Chromium.
 
 Smart multi-phase approach:
-1. Navigate to the site
-2. Find the auth/login page
-3. Switch to register mode (click register tab/link)
+1. If user gave a URL with a path, try it directly first
+2. Try common register/auth paths (fast, with short timeouts)
+3. Fall back to homepage link scanning
 4. Fill ALL visible form fields intelligently
 5. Submit and analyze the result
+
+Global timeout: 50 seconds max for the entire registration.
 """
 
 from __future__ import annotations
@@ -14,13 +16,14 @@ from __future__ import annotations
 import asyncio
 import random
 import shutil
-from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from app.core.logger import get_logger
 from app.core.utils import fake_first_name, fake_last_name, fake_username
 
 log = get_logger(__name__)
+
+GLOBAL_TIMEOUT = 50
 
 
 class RegistrationResult:
@@ -32,28 +35,18 @@ class RegistrationResult:
         self.page_url = page_url
 
 
-_LOGIN_LINK_TEXTS = [
-    "تسجيل الدخول", "دخول", "login", "log in", "sign in",
-    "حسابي", "my account",
-]
-
 _REGISTER_TAB_TEXTS = [
-    "سجل الآن", "إنشاء حساب", "حساب جديد", "تسجيل",
+    "سجل الآن", "إنشاء حساب", "حساب جديد",
     "سجل حساب", "أنشئ حساب", "إنشاء حساب جديد",
     "sign up", "signup", "register", "create account",
-    "create an account", "get started", "join", "join now",
+    "create an account", "get started", "join now",
     "don't have an account", "ما عندك حساب",
 ]
 
-_AUTH_PATHS = [
-    "/auth", "/login", "/signin", "/sign-in",
-    "/account/login", "/accounts/login", "/user/login",
-]
+_AUTH_PATHS = ["/auth", "/login", "/signin"]
 
 _REGISTER_PATHS = [
-    "/auth/register", "/register", "/signup", "/sign-up",
-    "/account/register", "/accounts/register", "/join",
-    "/auth/signup", "/user/register",
+    "/auth/register", "/register", "/signup", "/sign-up", "/join",
 ]
 
 _OTP_KEYWORDS = [
@@ -75,15 +68,15 @@ _SUCCESS_KEYWORDS = [
     "تم التسجيل", "حسابي",
 ]
 
+_NAV_TIMEOUT = 8_000
+_SHORT_WAIT = 0.5
+
 
 class PlaywrightClient:
-    def __init__(self, timeout: int = 20_000) -> None:
+    def __init__(self, timeout: int = 8_000) -> None:
         self._timeout = timeout
-        self._progress_callback = None
 
-    async def register(self, site_url: str, email: str, password: str,
-                       progress_callback=None) -> RegistrationResult:
-        self._progress_callback = progress_callback
+    async def register(self, site_url: str, email: str, password: str) -> RegistrationResult:
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -106,23 +99,27 @@ class PlaywrightClient:
                 launch_args["executable_path"] = chromium_path
 
             browser = await pw.chromium.launch(**launch_args)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800},
-            )
-            page = await context.new_page()
-
-            api_responses = []
-            page.on("response", lambda r: api_responses.append(
-                (r.status, r.url, r.request.method)
-            ) if "/api/" in r.url or r.request.method == "POST" else None)
-
             try:
-                result = await self._do_register(
-                    page, site_url, email, password,
-                    first, last, username, phone, api_responses,
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
+                )
+                page = await context.new_page()
+
+                api_responses = []
+                page.on("response", lambda r: api_responses.append(
+                    (r.status, r.url, r.request.method)
+                ) if "/api/" in r.url or r.request.method == "POST" else None)
+
+                result = await asyncio.wait_for(
+                    self._do_register(page, site_url, email, password,
+                                      first, last, username, phone, api_responses),
+                    timeout=GLOBAL_TIMEOUT,
                 )
                 return result
+            except asyncio.TimeoutError:
+                log.error("Global timeout (%ds) reached for %s", GLOBAL_TIMEOUT, site_url)
+                return RegistrationResult(False, message=f"انتهى الوقت ({GLOBAL_TIMEOUT}ث) — الموقع بطيء أو لم أجد نموذج تسجيل")
             except Exception as exc:
                 log.error("Playwright error: %s", exc)
                 return RegistrationResult(False, message=f"خطأ: {exc}")
@@ -131,110 +128,116 @@ class PlaywrightClient:
 
     async def _do_register(self, page, site_url, email, password,
                            first, last, username, phone, api_responses):
-        """Main registration flow."""
+        log.info("→ البحث عن صفحة التسجيل في %s", site_url)
 
-        # Phase 1: Find the registration page
-        self._log("البحث عن صفحة التسجيل...")
         reg_found = await self._navigate_to_register(page, site_url)
         if not reg_found:
             return RegistrationResult(False, message="لم أجد صفحة تسجيل على هذا الموقع")
 
-        self._log(f"وجدت نموذج التسجيل: {page.url}")
+        log.info("→ وجدت نموذج التسجيل: %s", page.url)
 
-        # Phase 2: Fill ALL visible form fields
         await self._smart_fill(page, email, password, first, last, username, phone)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
-        # Phase 3: Submit
-        self._log("إرسال النموذج...")
+        log.info("→ إرسال النموذج...")
         before_url = page.url
         api_responses.clear()
         submitted = await self._smart_submit(page)
         if not submitted:
             return RegistrationResult(False, message="لم أجد زر إرسال")
 
-        await asyncio.sleep(4)
+        await asyncio.sleep(2)
 
-        # Phase 4: Analyze result
         return await self._analyze(page, before_url, api_responses)
 
     async def _navigate_to_register(self, page, site_url: str) -> bool:
-        """Find and navigate to the registration form."""
+        parsed = urlparse(site_url)
+        has_path = parsed.path not in ("", "/")
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-        # Strategy 1: Try direct register paths
+        if has_path:
+            ok = await self._try_url(page, site_url)
+            if ok:
+                return True
+            ok = await self._try_url_with_register_tab(page, site_url)
+            if ok:
+                return True
+
         for path in _REGISTER_PATHS:
-            try:
-                url = urljoin(site_url, path)
-                await page.goto(url, timeout=self._timeout, wait_until="domcontentloaded")
-                await asyncio.sleep(1)
-                if await self._is_register_form(page):
-                    return True
-            except Exception:
-                continue
+            url = urljoin(base_url + "/", path)
+            ok = await self._try_url(page, url)
+            if ok:
+                return True
 
-        # Strategy 2: Go to auth paths and click register tab
         for path in _AUTH_PATHS:
-            try:
-                url = urljoin(site_url, path)
-                await page.goto(url, timeout=self._timeout, wait_until="domcontentloaded")
-                await asyncio.sleep(1)
-                if await self._click_register_tab(page):
-                    await asyncio.sleep(1.5)
-                    if await self._is_register_form(page):
-                        return True
-            except Exception:
-                continue
+            url = urljoin(base_url + "/", path)
+            ok = await self._try_url_with_register_tab(page, url)
+            if ok:
+                return True
 
-        # Strategy 3: Visit homepage and find auth/register links
-        try:
-            await page.goto(site_url, timeout=self._timeout, wait_until="domcontentloaded")
-            await asyncio.sleep(1)
-
-            if await self._click_auth_link(page):
-                await asyncio.sleep(1.5)
-                if await self._is_register_form(page):
-                    return True
-                if await self._click_register_tab(page):
-                    await asyncio.sleep(1.5)
-                    if await self._is_register_form(page):
-                        return True
-        except Exception:
-            pass
+        ok = await self._try_homepage_links(page, base_url)
+        if ok:
+            return True
 
         return False
 
-    async def _click_auth_link(self, page) -> bool:
-        """Click login/auth link on a page."""
-        for text in _LOGIN_LINK_TEXTS:
-            try:
-                loc = page.get_by_text(text, exact=False).first
-                if await loc.is_visible(timeout=1000):
-                    await loc.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
-                    return True
-            except Exception:
-                continue
+    async def _try_url(self, page, url: str) -> bool:
+        try:
+            await page.goto(url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            await asyncio.sleep(_SHORT_WAIT)
+            return await self._is_register_form(page)
+        except Exception as exc:
+            log.debug("_try_url %s failed: %s", url, exc)
+            return False
 
-        for sel in ['a[href*="auth"]', 'a[href*="login"]', 'a[href*="signin"]', 'a[href*="account"]']:
+    async def _try_url_with_register_tab(self, page, url: str) -> bool:
+        try:
+            await page.goto(url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            await asyncio.sleep(_SHORT_WAIT)
+            if await self._click_register_tab(page):
+                await asyncio.sleep(1)
+                if await self._is_register_form(page):
+                    return True
+            if await self._is_register_form(page):
+                return True
+        except Exception as exc:
+            log.debug("_try_url_with_tab %s failed: %s", url, exc)
+        return False
+
+    async def _try_homepage_links(self, page, base_url: str) -> bool:
+        try:
+            await page.goto(base_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+            await asyncio.sleep(_SHORT_WAIT)
+        except Exception:
+            return False
+
+        for sel in ['a[href*="auth"]', 'a[href*="login"]', 'a[href*="register"]',
+                    'a[href*="signup"]', 'a[href*="sign-up"]', 'a[href*="account"]']:
             try:
                 loc = page.locator(sel).first
-                if await loc.is_visible(timeout=1000):
+                if await loc.is_visible(timeout=500):
                     await loc.click()
                     await page.wait_for_load_state("domcontentloaded", timeout=5000)
-                    return True
+                    await asyncio.sleep(_SHORT_WAIT)
+                    if await self._is_register_form(page):
+                        return True
+                    if await self._click_register_tab(page):
+                        await asyncio.sleep(1)
+                        if await self._is_register_form(page):
+                            return True
+                    break
             except Exception:
                 continue
         return False
 
     async def _click_register_tab(self, page) -> bool:
-        """Click register/signup tab on login page."""
         for text in _REGISTER_TAB_TEXTS:
             try:
                 locs = page.get_by_text(text, exact=False)
                 count = await locs.count()
-                for i in range(count):
+                for i in range(min(count, 3)):
                     loc = locs.nth(i)
-                    if await loc.is_visible(timeout=500):
+                    if await loc.is_visible(timeout=300):
                         tag = await loc.evaluate("el => el.tagName.toLowerCase()")
                         if tag in ("a", "button", "span", "div", "p", "label"):
                             await loc.click()
@@ -244,7 +247,6 @@ class PlaywrightClient:
         return False
 
     async def _is_register_form(self, page) -> bool:
-        """Check if current page has a registration form (email + password + extra fields)."""
         has_email = False
         has_password = False
         visible_inputs = 0
@@ -271,13 +273,15 @@ class PlaywrightClient:
         if has_email and has_password and visible_inputs >= 3:
             return True
         if has_email and has_password:
-            body = (await page.inner_text("body")).lower()
-            if any(kw in body for kw in ["إنشاء حساب", "تسجيل", "register", "sign up", "create account"]):
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                return False
+            if any(kw in body for kw in ["إنشاء حساب", "حساب جديد", "register", "sign up", "create account"]):
                 return True
         return False
 
     async def _smart_fill(self, page, email, password, first, last, username, phone):
-        """Fill ALL visible form fields intelligently based on type/name/placeholder."""
         inputs = await page.query_selector_all("input")
         filled = []
 
@@ -300,51 +304,39 @@ class PlaywrightClient:
                 if inp_type == "email" or "email" in hint:
                     await inp.fill(email)
                     filled.append(f"email={email}")
-
                 elif inp_type == "password":
                     await inp.fill(password)
                     filled.append("password=***")
-
                 elif inp_type == "tel" or any(k in hint for k in ["phone", "mobile", "جوال", "هاتف", "05"]):
                     await inp.fill(phone)
                     filled.append(f"phone={phone}")
-
                 elif any(k in hint for k in ["first_name", "firstname", "fname", "الاسم الأول"]):
                     await inp.fill(first)
                     filled.append(f"first_name={first}")
-
                 elif any(k in hint for k in ["last_name", "lastname", "lname", "اسم العائلة"]):
                     await inp.fill(last)
                     filled.append(f"last_name={last}")
-
                 elif any(k in hint for k in ["full", "name", "الاسم", "اسمك"]):
                     await inp.fill(f"{first} {last}")
                     filled.append(f"name={first} {last}")
-
                 elif any(k in hint for k in ["username", "user_name", "المستخدم"]):
                     await inp.fill(username)
                     filled.append(f"username={username}")
-
                 elif any(k in hint for k in ["birth", "dob", "age", "تاريخ"]):
                     await inp.fill("1995-06-15")
                     filled.append("dob=1995-06-15")
-
                 elif any(k in hint for k in ["address", "عنوان"]):
                     await inp.fill("123 Main Street")
                     filled.append("address=123 Main Street")
-
                 elif any(k in hint for k in ["city", "مدينة"]):
                     await inp.fill("Riyadh")
                     filled.append("city=Riyadh")
-
                 elif any(k in hint for k in ["zip", "postal", "رمز بريدي"]):
                     await inp.fill("12345")
                     filled.append("zip=12345")
-
             except Exception as exc:
                 log.debug("Fill skip: %s", exc)
 
-        # Handle checkboxes (terms, etc.)
         checkboxes = await page.query_selector_all('input[type="checkbox"]')
         for cb in checkboxes:
             try:
@@ -354,7 +346,6 @@ class PlaywrightClient:
             except Exception:
                 pass
 
-        # Handle select dropdowns
         selects = await page.query_selector_all("select")
         for sel in selects:
             try:
@@ -371,7 +362,6 @@ class PlaywrightClient:
         log.info("→ Filled %d fields: %s", len(filled), ", ".join(filled))
 
     async def _smart_submit(self, page) -> bool:
-        """Find and click the submit button."""
         submit_texts = [
             "إنشاء حساب", "تسجيل", "سجل", "أنشئ حساب",
             "register", "sign up", "create account", "submit",
@@ -381,16 +371,16 @@ class PlaywrightClient:
         for text in submit_texts:
             try:
                 btn = page.locator(f'button:has-text("{text}")').first
-                if await btn.is_visible(timeout=500):
+                if await btn.is_visible(timeout=300):
                     await btn.click()
                     return True
             except Exception:
                 continue
 
-        for sel in ['button[type="submit"]', 'input[type="submit"]']:
+        for sel_str in ['button[type="submit"]', 'input[type="submit"]']:
             try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=1000):
+                btn = page.locator(sel_str).first
+                if await btn.is_visible(timeout=500):
                     await btn.click()
                     return True
             except Exception:
@@ -403,10 +393,8 @@ class PlaywrightClient:
             return False
 
     async def _analyze(self, page, before_url: str, api_responses: list) -> RegistrationResult:
-        """Analyze the result after form submission."""
         current_url = page.url
 
-        # Check API responses for clear signals
         for status, url, method in api_responses:
             if method == "POST":
                 url_lower = url.lower()
@@ -422,58 +410,31 @@ class PlaywrightClient:
         except Exception:
             pass
 
-        # Check for OTP/verification
         if any(kw in body for kw in _OTP_KEYWORDS):
-            return RegistrationResult(
-                True, needs_otp=True,
-                message="تم التسجيل — بانتظار رمز التحقق",
-                page_url=current_url,
-            )
+            return RegistrationResult(True, needs_otp=True,
+                                      message="تم التسجيل — بانتظار رمز التحقق",
+                                      page_url=current_url)
 
-        # Check for errors
         if any(kw in body for kw in _ERROR_KEYWORDS):
-            return RegistrationResult(
-                False, message="الحساب موجود مسبقاً بهذا الإيميل",
-                page_url=current_url,
-            )
+            return RegistrationResult(False, message="الحساب موجود مسبقاً بهذا الإيميل",
+                                      page_url=current_url)
 
-        # Check for success indicators
         if any(kw in body for kw in _SUCCESS_KEYWORDS):
-            return RegistrationResult(
-                True, message="✅ تم إنشاء الحساب بنجاح",
-                page_url=current_url,
-            )
+            return RegistrationResult(True, message="✅ تم إنشاء الحساب بنجاح",
+                                      page_url=current_url)
 
-        # URL changed to dashboard/account = success
         if current_url.rstrip("/") != before_url.rstrip("/"):
             path = current_url.lower()
             if any(k in path for k in ["account", "dashboard", "profile", "home", "welcome"]):
-                return RegistrationResult(
-                    True, message="✅ تم إنشاء الحساب بنجاح",
-                    page_url=current_url,
-                )
-            return RegistrationResult(
-                True, message="تم إرسال النموذج (تم التحويل لصفحة أخرى)",
-                page_url=current_url,
-            )
+                return RegistrationResult(True, message="✅ تم إنشاء الحساب بنجاح",
+                                          page_url=current_url)
+            return RegistrationResult(True, message="تم إرسال النموذج (تم التحويل لصفحة أخرى)",
+                                      page_url=current_url)
 
-        # Check POST responses
         for status, url, method in api_responses:
             if method == "POST" and 200 <= status < 300:
-                return RegistrationResult(
-                    True, message="تم إرسال النموذج",
-                    page_url=current_url,
-                )
+                return RegistrationResult(True, message="تم إرسال النموذج",
+                                          page_url=current_url)
 
-        return RegistrationResult(
-            True, message="تم إرسال النموذج — تحقق من النتيجة",
-            page_url=current_url,
-        )
-
-    def _log(self, msg: str):
-        log.info("→ %s", msg)
-        if self._progress_callback:
-            try:
-                self._progress_callback(msg)
-            except Exception:
-                pass
+        return RegistrationResult(True, message="تم إرسال النموذج — تحقق من النتيجة",
+                                  page_url=current_url)
