@@ -23,12 +23,16 @@ def _build_proxy_config(proxy_url: str) -> dict:
     """
     from urllib.parse import urlparse, unquote
     p = urlparse(proxy_url)
-    server = f"{p.scheme}://{p.hostname}:{p.port}"
+    if p.port:
+        server = f"{p.scheme}://{p.hostname}:{p.port}"
+    else:
+        server = f"{p.scheme}://{p.hostname}"
     cfg: dict = {"server": server}
     if p.username:
         cfg["username"] = unquote(p.username)
     if p.password:
         cfg["password"] = unquote(p.password)
+    log.debug("Proxy config built: server=%s user=%s", server, p.username)
     return cfg
 
 PAYMENT_TIMEOUT = 300
@@ -361,9 +365,25 @@ class PaymentClient:
             log.error("Login navigation failed: %s", exc)
             return False
 
+        # For ChatGPT/OpenAI: wait for redirect to auth.openai.com
+        if domain == "chatgpt.com":
+            try:
+                await page.wait_for_url("**/authorize**", timeout=8000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
         await self._wait_for_cf(page)
 
-        for attempt in range(4):
+        # Log current URL + page snippet for diagnosis
+        try:
+            cur_url = page.url
+            body_snip = (await page.inner_text("body"))[:400]
+            log.info("Login page URL: %s | body[:200]: %s", cur_url[:120], body_snip[:200].replace("\n", " "))
+        except Exception:
+            pass
+
+        for attempt in range(6):
             email_input = await self._find_input(page, ["email", "username", "login", "identifier"])
             if email_input:
                 break
@@ -385,11 +405,19 @@ class PaymentClient:
                         break
                 except Exception:
                     continue
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
 
         email_input = await self._find_input(page, ["email", "username", "login", "identifier"])
         if not email_input:
-            log.warning("No email input found on login page")
+            try:
+                cur_url = page.url
+                body_snip = (await page.inner_text("body"))[:500]
+                log.warning(
+                    "No email input found. URL=%s | body[:300]: %s",
+                    cur_url[:120], body_snip[:300].replace("\n", " ")
+                )
+            except Exception:
+                log.warning("No email input found on login page (could not read page state)")
             return False
 
         await self._fill_input(email_input, email)
