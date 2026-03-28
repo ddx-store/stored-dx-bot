@@ -67,6 +67,19 @@ def main() -> None:
         loop = asyncio.get_running_loop()
         set_main_loop(loop)
         log.info("Main event loop stored for worker threads")
+
+        # تشغيل OTP Webhook server إذا تم ضبط المنفذ
+        try:
+            import os
+            webhook_port = int(os.environ.get("WEBHOOK_OTP_PORT", "0"))
+            if webhook_port:
+                from app.gmail.otp_webhook import otp_webhook
+                otp_webhook._port = webhook_port
+                otp_webhook.start_in_background(loop)
+                log.info("OTP Webhook server scheduled on port %d", webhook_port)
+        except Exception as we:
+            log.debug("OTP Webhook skipped: %s", we)
+
         me = await app.bot.get_me()
         log.info("Bot identity: @%s (id=%s)", me.username, me.id)
 

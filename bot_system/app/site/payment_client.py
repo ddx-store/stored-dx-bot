@@ -10,11 +10,13 @@ from urllib.parse import urlparse
 
 from app.core.logger import get_logger
 from app.core.secure_logger import secure_logger
+from app.core.identity_engine import identity_engine
 from app.site.session_cache import session_cache
 from app.site.human_behavior import human_sim
 from app.site.captcha_solver import captcha_solver
 from app.site.result_validator import subscription_validator
 from app.site.browser_warmup import browser_warmup
+from app.site.dom_adapter import dom_adapter
 
 log = get_logger(__name__)
 
@@ -356,6 +358,17 @@ class PaymentClient:
         if not payment_form:
             return PaymentResult(False, message="لم أجد نموذج الدفع -- قد يطلب الموقع خطوات يدوية")
 
+        # توليد هوية سياقية إذا كان اسم حامل البطاقة غير موجود أو عشوائي
+        if not card_holder or len(card_holder.strip()) < 3:
+            ident = identity_engine.generate(
+                proxy_country=billing_country or "US",
+                bin_country=billing_country or "US",
+            )
+            card_holder = ident.full_name
+            if not billing_zip:
+                billing_zip = ident.zip_code
+            log.debug("IdentityEngine: using generated holder=%s zip=%s", card_holder, billing_zip)
+
         self._report("تعبئة بيانات البطاقة...")
         api_responses.clear()
         before_url = page.url
@@ -457,6 +470,18 @@ class PaymentClient:
             await asyncio.sleep(1.5)
 
         email_input = await self._find_input(page, ["email", "username", "login", "identifier"])
+        if not email_input:
+            # محاولة اكتشاف النموذج تلقائياً عبر DOMAdapter
+            try:
+                discovered = await dom_adapter.discover(page, domain)
+                if discovered and discovered.email_selector:
+                    email_loc = page.locator(discovered.email_selector).first
+                    if await email_loc.is_visible(timeout=1500):
+                        email_input = email_loc
+                        log.info("DOMAdapter: recovered email input via %s for %s", discovered.strategy_used, domain)
+            except Exception as da_exc:
+                log.debug("DOMAdapter fallback failed: %s", da_exc)
+
         if not email_input:
             try:
                 cur_url = page.url

@@ -147,7 +147,7 @@ class CaptchaSolver:
         return None
 
     async def _solve_capmonster(self, captcha_type: str, site_key: str, page_url: str) -> Optional[str]:
-        import aiohttp
+        from app.site.tls_client import TLSClient
         task_map = {
             "hcaptcha": "HCaptchaTaskProxyless",
             "recaptcha_v2": "NoCaptchaTaskProxyless",
@@ -158,49 +158,49 @@ class CaptchaSolver:
             "clientKey": self._capmonster_key,
             "task": {"type": task_type, "websiteURL": page_url, "websiteKey": site_key},
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{_CAPMONSTER_URL}/createTask", json=payload, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                data = await r.json()
+        async with TLSClient() as client:
+            r = await client.post(f"{_CAPMONSTER_URL}/createTask", json=payload, timeout=15)
+            data = await r.json()
             task_id = data.get("taskId")
             if not task_id:
                 return None
             for _ in range(_MAX_POLLS):
                 await asyncio.sleep(_POLL_INTERVAL)
-                async with session.post(
+                r2 = await client.post(
                     f"{_CAPMONSTER_URL}/getTaskResult",
                     json={"clientKey": self._capmonster_key, "taskId": task_id},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r2:
-                    result = await r2.json()
+                    timeout=10,
+                )
+                result = await r2.json()
                 if result.get("status") == "ready":
                     return result.get("solution", {}).get("gRecaptchaResponse") or result.get("solution", {}).get("token")
         return None
 
     async def _solve_2captcha(self, captcha_type: str, site_key: str, page_url: str) -> Optional[str]:
-        import aiohttp
+        from app.site.tls_client import TLSClient
         method_map = {"hcaptcha": "hcaptcha", "recaptcha_v2": "userrecaptcha", "turnstile": "turnstile"}
         method = method_map.get(captcha_type, "hcaptcha")
         params = {"key": self._2captcha_key, "method": method, "sitekey": site_key, "pageurl": page_url, "json": 1}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(_2CAPTCHA_URL, params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                data = await r.json()
+        async with TLSClient() as client:
+            r = await client.get(_2CAPTCHA_URL, params=params, timeout=15)
+            data = await r.json()
             if data.get("status") != 1:
                 return None
             task_id = data.get("request")
             for _ in range(_MAX_POLLS):
                 await asyncio.sleep(_POLL_INTERVAL)
-                async with session.get(
+                r2 = await client.get(
                     "https://2captcha.com/res.php",
                     params={"key": self._2captcha_key, "action": "get", "id": task_id, "json": 1},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r2:
-                    result = await r2.json()
+                    timeout=10,
+                )
+                result = await r2.json()
                 if result.get("status") == 1:
                     return result.get("request")
         return None
 
     async def _solve_anticaptcha(self, captcha_type: str, site_key: str, page_url: str) -> Optional[str]:
-        import aiohttp
+        from app.site.tls_client import TLSClient
         task_map = {
             "hcaptcha": "HCaptchaTaskProxyless",
             "recaptcha_v2": "NoCaptchaTaskProxyless",
@@ -211,20 +211,20 @@ class CaptchaSolver:
             "clientKey": self._anticaptcha_key,
             "task": {"type": task_type, "websiteURL": page_url, "websiteKey": site_key},
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{_ANTICAPTCHA_URL}/createTask", json=payload, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                data = await r.json()
+        async with TLSClient() as client:
+            r = await client.post(f"{_ANTICAPTCHA_URL}/createTask", json=payload, timeout=15)
+            data = await r.json()
             task_id = data.get("taskId")
             if not task_id:
                 return None
             for _ in range(_MAX_POLLS):
                 await asyncio.sleep(_POLL_INTERVAL)
-                async with session.post(
+                r2 = await client.post(
                     f"{_ANTICAPTCHA_URL}/getTaskResult",
                     json={"clientKey": self._anticaptcha_key, "taskId": task_id},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r2:
-                    result = await r2.json()
+                    timeout=10,
+                )
+                result = await r2.json()
                 if result.get("status") == "ready":
                     return result.get("solution", {}).get("gRecaptchaResponse") or result.get("solution", {}).get("token")
         return None

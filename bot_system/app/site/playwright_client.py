@@ -24,6 +24,7 @@ import shutil
 from urllib.parse import urljoin, urlparse
 
 from app.core.fingerprint import fingerprint_engine
+from app.site.dom_adapter import dom_adapter
 
 from app.core.logger import get_logger
 from app.core.utils import fake_first_name, fake_last_name, fake_username

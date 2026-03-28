@@ -67,10 +67,10 @@ class SubscriptionValidator:
             return None
 
         try:
-            import aiohttp
+            from app.site.tls_client import TLSClient
             # Extract cookies from Playwright page
-            context = page.context
-            cookies = await context.cookies()
+            ctx = page.context
+            cookies = await ctx.cookies()
             cookie_jar = {c["name"]: c["value"] for c in cookies if domain in c.get("domain", "")}
 
             headers = {
@@ -81,29 +81,19 @@ class SubscriptionValidator:
                 **validator.get("headers", {}),
             }
 
-            async with aiohttp.ClientSession(
-                cookies=cookie_jar,
-                headers=headers,
-            ) as session:
-                async with session.get(
-                    validator["url"],
-                    timeout=aiohttp.ClientTimeout(total=_TIMEOUT),
-                    allow_redirects=True,
-                ) as resp:
-                    if resp.status == 401:
-                        log.warning("Validator: 401 for %s — session may have expired", domain)
-                        return None
-                    if resp.status != 200:
-                        log.warning("Validator: HTTP %d for %s", resp.status, domain)
-                        return None
-                    data = await resp.json(content_type=None)
-                    result = validator["check"](data)
-                    log.info("Validator: domain=%s → subscribed=%s", domain, result)
-                    return result
+            async with TLSClient(cookies=cookie_jar, headers=headers) as client:
+                resp = await client.get(validator["url"], timeout=_TIMEOUT)
+                if resp.status == 401:
+                    log.warning("Validator: 401 for %s — session may have expired", domain)
+                    return None
+                if resp.status != 200:
+                    log.warning("Validator: HTTP %d for %s", resp.status, domain)
+                    return None
+                data = await resp.json()
+                result = validator["check"](data)
+                log.info("Validator: domain=%s → subscribed=%s", domain, result)
+                return result
 
-        except ImportError:
-            log.debug("aiohttp not available — skipping validation")
-            return None
         except Exception as exc:
             log.warning("Validator error for %s: %s", domain, exc)
 
