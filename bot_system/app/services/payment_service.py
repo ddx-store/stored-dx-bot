@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 import traceback
 
+from urllib.parse import urlparse
+
 from app.core.enums import JobStatus
 from app.core.logger import get_logger
+from app.core.secure_logger import secure_logger
 from app.services.notification_service import NotificationService
 from app.site.payment_client import PaymentClient
+from app.site.proxy_scorer import proxy_scorer
 from app.storage.models import CardInfo, PaymentJob, Result, SavedAccount
 from app.storage.repositories import ProxyRepository, ResultRepository, SavedAccountRepository
 
@@ -28,11 +32,16 @@ class PaymentService:
         job_proxy = _PaymentJobProxy(pjob)
 
         proxy_url: str | None = None
+        active_proxy_id: int | None = None
+        domain = urlparse(pjob.site_url).netloc.replace("www.", "")
+        _start_time = __import__("time").monotonic()
         try:
-            p = self._proxies.get_random_active()
+            all_proxies = self._proxies.get_all_active()
+            p = proxy_scorer.pick_best(all_proxies, domain) if all_proxies else self._proxies.get_random_active()
             if p:
                 proxy_url = p.proxy_url
-                log.info("Payment job %s using proxy: %s", pjob.job_id, p.label or proxy_url[:40])
+                active_proxy_id = p.id
+                log.info("Payment job %s using proxy#%d: %s", pjob.job_id, p.id, p.label or proxy_url[:40])
         except Exception as pe:
             log.warning("Could not fetch proxy: %s", pe)
 
@@ -105,10 +114,36 @@ class PaymentService:
                 self._handle_cancel(pjob, job_proxy)
                 return
 
-            log.info("Payment result: success=%s msg=%s", result.success, result.message)  
+            log.info("Payment result: success=%s msg=%s", result.success, result.message)
+
+            # Record proxy performance for future scoring
+            if active_proxy_id is not None:
+                latency_ms = (__import__("time").monotonic() - _start_time) * 1000
+                proxy_scorer.record_result(
+                    active_proxy_id, domain, result.success, latency_ms
+                )
+            secure_logger.log_payment(
+                pjob.email, pjob.card_last4 or "????", domain,
+                "SUCCESS" if result.success else "FAIL"
+            )
 
             if not result.success:
+                # Feed throttler for bulk jobs
+                if getattr(pjob, "is_bulk", False):
+                    try:
+                        from app.core.throttler import bulk_throttler
+                        bulk_throttler.record_failure()
+                    except Exception:
+                        pass
                 raise RuntimeError(result.message)
+
+            # Feed throttler on success for bulk jobs
+            if getattr(pjob, "is_bulk", False):
+                try:
+                    from app.core.throttler import bulk_throttler
+                    bulk_throttler.record_success()
+                except Exception:
+                    pass
 
             detail = result.message or "تم الدفع بنجاح"
             pjob.final_result = detail

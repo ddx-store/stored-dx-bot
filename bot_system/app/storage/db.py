@@ -123,6 +123,18 @@ CREATE TABLE IF NOT EXISTS pending_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pending_user ON pending_sessions (user_id);
+
+CREATE TABLE IF NOT EXISTS proxy_scores (
+    proxy_id              INTEGER PRIMARY KEY,
+    total_attempts        INTEGER NOT NULL DEFAULT 0,
+    total_successes       INTEGER NOT NULL DEFAULT 0,
+    avg_latency_ms        REAL NOT NULL DEFAULT 1500.0,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+    circuit_open          INTEGER NOT NULL DEFAULT 0,
+    circuit_open_at       REAL NOT NULL DEFAULT 0,
+    site_failures         TEXT NOT NULL DEFAULT '{}',
+    updated_at            TEXT NOT NULL
+);
 """
 
 # Migration: add site_url column to existing databases that don't have it.

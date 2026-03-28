@@ -9,6 +9,11 @@ from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from app.core.logger import get_logger
+from app.core.secure_logger import secure_logger
+from app.site.session_cache import session_cache
+from app.site.human_behavior import human_sim
+from app.site.captcha_solver import captcha_solver
+from app.site.result_validator import subscription_validator
 
 log = get_logger(__name__)
 
@@ -145,9 +150,17 @@ class PaymentClient:
         Only a new browser context (isolated session) is created.
         """
         self._progress_callback = progress_callback
+        self._email = email
+        self._site_url = site_url
+        domain = urlparse(site_url).netloc.replace("www.", "")
         context = None
         try:
-            context = await pool.new_context(proxy_url=proxy_url)
+            # Check session cache — skip login if valid session exists
+            cached_state = session_cache.get(email, domain)
+            context = await pool.new_context(
+                proxy_url=proxy_url,
+                storage_state=cached_state if cached_state else None,
+            )
             page = await context.new_page()
             result = await asyncio.wait_for(
                 self._do_payment(
@@ -156,6 +169,8 @@ class PaymentClient:
                     card_cvv, card_holder, plan_name,
                     billing_zip, billing_country,
                     job_id=job_id,
+                    skip_login=bool(cached_state),
+                    context=context,
                 ),
                 timeout=PAYMENT_TIMEOUT,
             )
@@ -278,6 +293,8 @@ class PaymentClient:
         card_cvv, card_holder, plan_name,
         billing_zip="", billing_country="US",
         job_id: str = "",
+        skip_login: bool = False,
+        context=None,
     ) -> PaymentResult:
         domain = urlparse(site_url).netloc.replace("www.", "")
 
@@ -293,9 +310,30 @@ class PaymentClient:
         page.on("response", _on_response)
 
         self._report("فتح الموقع...")
-        login_result = await self._login(page, site_url, domain, email, password, job_id=job_id)
-        if not login_result:
-            return PaymentResult(False, message="فشل تسجيل الدخول")
+
+        if skip_login:
+            log.info("SessionCache HIT — skipping login for %s@%s", email[:6], domain)
+            self._report("جلسة محفوظة — تخطي تسجيل الدخول...")
+            try:
+                upgrade_url = _UPGRADE_URLS.get(domain, site_url)
+                await page.goto(upgrade_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+                await self._wait_spa(page)
+            except Exception:
+                skip_login = False
+
+        if not skip_login:
+            login_result = await self._login(page, site_url, domain, email, password, job_id=job_id)
+            if not login_result:
+                secure_logger.log_login(email, domain, False)
+                return PaymentResult(False, message="فشل تسجيل الدخول")
+            # Save session to cache after successful login
+            if context:
+                try:
+                    state = await context.storage_state()
+                    session_cache.store(email, domain, state)
+                except Exception as se:
+                    log.debug("Could not save session state: %s", se)
+            secure_logger.log_login(email, domain, True)
 
         self._report("البحث عن صفحة الاشتراك...")
         upgrade_found = await self._navigate_to_upgrade(page, domain, plan_name)
@@ -332,7 +370,7 @@ class PaymentClient:
                 page_url=page.url,
             )
 
-        success = await self._check_payment_result(page, api_responses, before_url)
+        success = await self._check_payment_result(page, api_responses, before_url, domain=domain)
 
         if success:
             return PaymentResult(True, message="تم الدفع والاشتراك بنجاح", page_url=page.url)
@@ -1019,7 +1057,7 @@ class PaymentClient:
 
         return False
 
-    async def _check_payment_result(self, page, api_responses=None, before_url="") -> bool:
+    async def _check_payment_result(self, page, api_responses=None, before_url="", domain: str = "") -> bool:
         await self._wait_spa(page)
         await asyncio.sleep(2)
 
@@ -1039,6 +1077,13 @@ class PaymentClient:
                     url_path = urlparse(url).path.lower()
                     if any(p in url_path for p in payment_api_paths):
                         log.info("Payment success detected via API: %s %s", status, url[:120])
+                        # Also verify subscription via API
+                        if domain:
+                            verified = await subscription_validator.validate(domain, page)
+                            if verified is False:
+                                log.warning("API success but subscription validator says NOT active — retrying check")
+                            elif verified is True:
+                                log.info("Subscription verified by validator")
                         return True
 
         body = ""
@@ -1065,6 +1110,13 @@ class PaymentClient:
         ]
         for kw in success_kw:
             if kw in body:
+                return True
+
+        # Final fallback: API subscription check
+        if domain:
+            verified = await subscription_validator.validate(domain, page)
+            if verified is True:
+                log.info("Payment result: positive by subscription validator")
                 return True
 
         return False
@@ -1235,27 +1287,30 @@ class PaymentClient:
         return None
 
     async def _fill_input(self, inp, value: str):
+        """Human-like field fill: Bézier mouse + variable WPM typing."""
         try:
-            await inp.click()
-            await asyncio.sleep(0.05)
+            await human_sim.human_type(inp, value)
         except Exception:
-            pass
-        try:
-            await inp.fill(value)
-        except Exception:
+            # Fallback to direct fill if human_sim fails
             try:
-                await inp.click(force=True)
-                await asyncio.sleep(0.1)
-                await inp.type(value, delay=30)
+                await inp.click()
+                await asyncio.sleep(0.05)
+                await inp.fill(value)
             except Exception:
-                pass
-        await asyncio.sleep(0.05)
+                try:
+                    await inp.click(force=True)
+                    await asyncio.sleep(0.1)
+                    await inp.type(value, delay=30)
+                except Exception:
+                    pass
+        await asyncio.sleep(random.uniform(0.05, 0.15))
 
     async def _click_submit(self, page, texts) -> bool:
         for text in texts:
             try:
                 btn = page.locator(f'button:has-text("{text}")').first
                 if await btn.is_visible(timeout=500):
+                    await human_sim.hover_before_click(page, btn)
                     await btn.click()
                     return True
             except Exception:
@@ -1265,6 +1320,7 @@ class PaymentClient:
             try:
                 btn = page.locator(sel).first
                 if await btn.is_visible(timeout=500):
+                    await human_sim.hover_before_click(page, btn)
                     await btn.click()
                     return True
             except Exception:
@@ -1279,13 +1335,19 @@ class PaymentClient:
         await asyncio.sleep(0.3)
 
     async def _wait_for_cf(self, page, max_wait=15):
+        """Wait for Cloudflare/anti-bot pages; attempt auto-captcha solving."""
         cf_phrases = ["checking your browser", "verify you are human", "just a moment"]
         elapsed = 0
+        _captcha_attempted = False
         while elapsed < max_wait:
             try:
                 body = (await page.inner_text("body"))[:500].lower()
                 if not any(p in body for p in cf_phrases):
                     return
+                # Attempt captcha solving once
+                if not _captcha_attempted:
+                    _captcha_attempted = True
+                    await captcha_solver.solve_if_present(page)
             except Exception:
                 return
             await asyncio.sleep(1)

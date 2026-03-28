@@ -70,5 +70,21 @@ class Config:
     ADMIN_CHAT_ID: int = _int("ADMIN_CHAT_ID", 0)
     CLEANUP_DAYS: int = _int("CLEANUP_DAYS", 30)
 
+    # Multi-Gmail pool (JSON array: [{"user":..,"app_password":..}])
+    GMAIL_ACCOUNTS: str = _optional("GMAIL_ACCOUNTS", "")
+
+    # CAPTCHA solvers (at least one needed for auto-solving)
+    CAPMONSTER_API_KEY: str = _optional("CAPMONSTER_API_KEY", "")
+    TWOCAPTCHA_API_KEY: str = _optional("TWOCAPTCHA_API_KEY", "")
+    ANTICAPTCHA_API_KEY: str = _optional("ANTICAPTCHA_API_KEY", "")
+
+    # Session cache TTL in minutes
+    SESSION_CACHE_TTL_MINUTES: int = _int("SESSION_CACHE_TTL_MINUTES", 40)
+
+    # Bulk throttler delays (seconds)
+    BULK_INITIAL_DELAY: float = float(_optional("BULK_INITIAL_DELAY", "35"))
+    BULK_MIN_DELAY: float = float(_optional("BULK_MIN_DELAY", "10"))
+    BULK_MAX_DELAY: float = float(_optional("BULK_MAX_DELAY", "180"))
+
 
 config = Config()

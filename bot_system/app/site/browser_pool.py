@@ -1,6 +1,7 @@
 """
 Persistent browser pool — keeps one Chromium process alive across all payment jobs.
 Worker threads submit coroutines via submit() using run_coroutine_threadsafe.
+Uses FingerprintEngine to generate a unique browser profile per context.
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import shutil
 import threading
 from typing import Optional
 
+from app.core.fingerprint import fingerprint_engine
 from app.core.logger import get_logger
 
 log = get_logger(__name__)
@@ -97,9 +99,14 @@ class BrowserPool:
             log.error("BrowserPool: failed to launch browser: %s", exc)
             self._browser = None
 
-    async def new_context(self, proxy_url: Optional[str] = None):
+    async def new_context(
+        self,
+        proxy_url: Optional[str] = None,
+        proxy_country: str = "US",
+        storage_state: Optional[dict] = None,
+    ):
         """
-        Create a new browser context (isolated session).
+        Create a new browser context (isolated session) with unique fingerprint.
         Reopens the browser if it crashed.
         """
         async with self._lock:
@@ -109,31 +116,41 @@ class BrowserPool:
             if self._browser is None:
                 raise RuntimeError("BrowserPool: Chromium could not be started")
 
+        # Generate unique fingerprint for this session
+        fp = fingerprint_engine.generate(proxy_country=proxy_country)
+        cv = fp.chrome_version
+
         ctx_args = dict(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/134.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
+            user_agent=fp.user_agent,
+            viewport=fp.viewport,
             locale="en-US",
-            timezone_id="America/New_York",
+            timezone_id=fp.timezone_id,
             color_scheme="light",
             java_script_enabled=True,
             bypass_csp=True,
             extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-                "sec-ch-ua": '"Google Chrome";v="134", "Chromium";v="134"',
+                "Accept-Language": "en-US,en;q=0.9",
+                "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}"',
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"Windows"',
             },
         )
+
         if proxy_url:
             from app.site.payment_client import _build_proxy_config
             ctx_args["proxy"] = _build_proxy_config(proxy_url)
 
+        if storage_state:
+            ctx_args["storage_state"] = storage_state
+
         context = await self._browser.new_context(**ctx_args)
-        await context.add_init_script(_STEALTH_JS)
+        # Use fingerprint-specific init script (replaces old static _STEALTH_JS)
+        await context.add_init_script(fp.build_init_script())
+        log.debug(
+            "BrowserPool: new context UA=%s... TZ=%s viewport=%sx%s",
+            fp.user_agent[:40], fp.timezone_id,
+            fp.viewport["width"], fp.viewport["height"],
+        )
         return context
 
     def submit(self, coro) -> "asyncio.Future":

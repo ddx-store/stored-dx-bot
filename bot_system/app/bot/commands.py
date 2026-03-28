@@ -1031,22 +1031,42 @@ async def _run_bulk_payment(
     billing_country: str,
     cards: list,
 ) -> None:
-    """Submit all cards as individual payment jobs and track results."""
+    """
+    Submit cards as individual payment jobs one-by-one with adaptive delays.
+    Sequential throttling prevents rate-limiting and proxy flagging.
+    Pauses automatically after 3 consecutive failures.
+    """
     from app.storage.models import PaymentJob, CardInfo
     from app.jobs.scheduler import scheduler
     from app.services.notification_service import NotificationService
+    from app.core.throttler import bulk_throttler
     import asyncio
     import threading
 
     total = len(cards)
-    results = {"success": 0, "fail": 0, "done": 0, "lock": threading.Lock()}
     chat_id = update.effective_chat.id
     notify = NotificationService()
+
+    # Reset throttler state for a new bulk session
+    bulk_throttler.reset_failures()
 
     for idx, card in enumerate(cards, 1):
         masked = f"****{card.number[-4:]}"
         card.billing_country = billing_country
         card.billing_zip = card.billing_zip or ""
+
+        # Check if throttler has detected consecutive failures → pause
+        if bulk_throttler.should_pause:
+            pause_msg = (
+                f"⏸ *توقف مؤقت* — تم رصد {3}+ فشل متتالي.\n"
+                f"سيُستأنف الجدول تلقائياً.\n"
+                f"البطاقة {idx}/{total}: `{masked}`"
+            )
+            await update.effective_message.reply_text(
+                pause_msg, parse_mode="Markdown"
+            )
+            await asyncio.sleep(120)
+            bulk_throttler.reset_failures()
 
         job_id = new_job_id()
         pjob = PaymentJob(
@@ -1062,6 +1082,10 @@ async def _run_bulk_payment(
 
         scheduler.submit_payment(pjob, card)
         log.info("Bulk job %s submitted: card %d/%d masked=%s", job_id, idx, total, masked)
+
+        # Don't wait after the last card
+        if idx < total:
+            await bulk_throttler.wait()
 
 
 def _parse_card(text: str):

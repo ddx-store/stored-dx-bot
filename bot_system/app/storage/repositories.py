@@ -316,6 +316,15 @@ class ProxyRepository:
             added_at=datetime.fromisoformat(r["added_at"]),
         ) for r in rows]
 
+    def get_all_active(self):
+        rows = self._conn.execute(
+            "SELECT * FROM proxies WHERE active = 1"
+        ).fetchall()
+        return [Proxy(
+            id=r["id"], proxy_url=r["proxy_url"], label=r["label"],
+            active=True, added_at=datetime.fromisoformat(r["added_at"]),
+        ) for r in rows]
+
     def get_random_active(self) -> Optional[Proxy]:
         row = self._conn.execute(
             "SELECT * FROM proxies WHERE active = 1 ORDER BY RANDOM() LIMIT 1"
