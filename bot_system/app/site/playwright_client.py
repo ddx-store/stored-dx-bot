@@ -134,11 +134,13 @@ _CF_WAIT_PHRASES = [
 
 class RegistrationResult:
     def __init__(self, success: bool, needs_otp: bool = False,
-                 message: str = "", page_url: str = "") -> None:
+                 message: str = "", page_url: str = "",
+                 account_confirmed: bool = False) -> None:
         self.success = success
         self.needs_otp = needs_otp
         self.message = message
         self.page_url = page_url
+        self.account_confirmed = account_confirmed  # تم التحقق من الحساب فعلاً
 
 
 _REGISTER_TAB_TEXTS = [
@@ -158,10 +160,32 @@ _REGISTER_PATHS = [
 ]
 
 _DIRECT_AUTH_URLS = {
-    "chatgpt.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&prompt=login",
-    "chat.openai.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&prompt=login",
+    # ChatGPT signup — screen_hint=signup forces the signup screen on Auth0
+    "chatgpt.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&screen_hint=signup&prompt=create",
+    "chat.openai.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&screen_hint=signup&prompt=create",
     "canva.com": "https://www.canva.com/signup",
 }
+
+# Keywords that appear when signup succeeded (post-auth redirect)
+_SIGNUP_SUCCESS_URLS = [
+    "chatgpt.com/?",          # ChatGPT main page after signup
+    "chatgpt.com/c/",          # Chat session
+    "chatgpt.com/gpts",
+    "chat.openai.com",
+    "/onboarding",
+    "/welcome",
+    "/dashboard",
+    "/home",
+]
+
+# ChatGPT-specific error phrases on the signup page
+_CHATGPT_ERROR_PHRASES = [
+    "email already in use",
+    "account already exists",
+    "email is already registered",
+    "this email is already",
+    "already have an account",
+]
 
 _OTP_KEYWORDS = [
     "verification code", "verify your email", "check your email",
@@ -365,6 +389,17 @@ class PlaywrightClient:
                     )
                     return profile_result
 
+            # تأكيد الحساب: تحقق من صحة الإنشاء الفعلي
+            if result.success and not result.needs_otp:
+                self._report("التحقق من تأكيد الحساب...")
+                confirmed = await self._post_registration_verify(page, site_url, email)
+                if confirmed:
+                    result.account_confirmed = True
+                    result.message = result.message.replace("تم إنشاء الحساب بنجاح", "✅ تم إنشاء الحساب وتأكيده")
+                    if "✅" not in result.message:
+                        result.message = "✅ " + result.message
+                    log.info("Account confirmed for %s at %s", email[:6], site_url)
+
             return result
         except asyncio.TimeoutError:
             log.error("Global timeout (%ds) reached for %s", GLOBAL_TIMEOUT, site_url)
@@ -500,7 +535,19 @@ class PlaywrightClient:
                 pass
 
             if page.url.rstrip("/") != before_url.rstrip("/"):
-                await self._wait_for_cf(page, max_wait=15)
+                cf_ok = await self._wait_for_cf(page, max_wait=20)
+                if not cf_ok:
+                    # تحقق إذا كان Cloudflare لا يزال يحجب الصفحة
+                    try:
+                        body_cf = (await page.inner_text("body")).lower()
+                    except Exception:
+                        body_cf = ""
+                    if any(p in body_cf for p in _CF_WAIT_PHRASES):
+                        return RegistrationResult(
+                            False,
+                            message="Cloudflare تحجب الصفحة -- جرب بروكسي مختلف أو حاول لاحقاً",
+                            page_url=page.url,
+                        )
                 await self._wait_for_spa(page)
 
             step_result = await self._analyze(page, before_url, api_responses)
@@ -2351,3 +2398,68 @@ class PlaywrightClient:
             message="تم إرسال النموذج -- تحقق من النتيجة",
             page_url=current_url
         )
+
+    async def _post_registration_verify(self, page, site_url: str, email: str) -> bool:
+        """
+        يتحقق من أن الحساب أُنشئ فعلاً بعد انتهاء التسجيل.
+        يستخدم الصفحة الحالية بعد التسجيل لفحص مؤشرات النجاح.
+        يُرجع True إذا تأكّد وجود الحساب، False إذا لم يُتحقق.
+        """
+        try:
+            parsed = urlparse(site_url)
+            host = parsed.netloc.lower().lstrip("www.")
+            current_url = page.url.lower()
+
+            # --- تحقق مبني على URL بعد إعادة التوجيه ---
+            for success_url in _SIGNUP_SUCCESS_URLS:
+                if success_url.lower() in current_url:
+                    log.info("_post_verify: URL match '%s' → confirmed", success_url)
+                    return True
+
+            # --- تحقق ChatGPT: وصلنا للداشبورد = حساب حقيقي ---
+            if "chatgpt.com" in host or "openai.com" in host:
+                # إذا تم التحويل لـ chatgpt.com وليس صفحة auth = نجاح
+                if "chatgpt.com" in current_url and "auth" not in current_url and "authorize" not in current_url:
+                    log.info("_post_verify: ChatGPT dashboard reached → confirmed")
+                    return True
+                # انتظر قليلاً وراقب URL
+                for _ in range(3):
+                    await asyncio.sleep(2)
+                    url_now = page.url.lower()
+                    if "chatgpt.com" in url_now and "auth" not in url_now:
+                        log.info("_post_verify: ChatGPT redirect detected → confirmed")
+                        return True
+                    if any(kw in url_now for kw in ["/onboarding", "/welcome", "/?", "/c/"]):
+                        return True
+                return False
+
+            # --- تحقق عبر نص الصفحة ---
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                body = ""
+
+            # مؤشرات إيجابية في الصفحة
+            positive = [
+                "account created", "registration complete", "welcome",
+                "check your email", "verify your email", "we sent you",
+                "تم إنشاء", "تم التسجيل", "مرحباً", "تحقق من بريدك",
+                "confirm your email", "verification link",
+            ]
+            if any(kw in body for kw in positive):
+                return True
+
+            # --- تحقق API: هل تلقينا response ناجح من الخادم؟ ---
+            # (لا نملك api_responses هنا — نعتمد على URL)
+            if current_url.rstrip("/") != site_url.rstrip("/").lower():
+                # تم إعادة التوجيه = علامة إيجابية
+                bad_paths = ["login", "signin", "auth/login", "authorize", "register", "signup"]
+                is_still_on_auth = any(bad in current_url for bad in bad_paths)
+                if not is_still_on_auth:
+                    log.info("_post_verify: redirected away from auth → likely confirmed")
+                    return True
+
+        except Exception as exc:
+            log.debug("_post_registration_verify error: %s", exc)
+
+        return False

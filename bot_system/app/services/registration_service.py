@@ -83,8 +83,10 @@ class RegistrationService:
                 self._handle_cancel(job)
                 return
 
-            log.info("Playwright result: success=%s otp=%s msg=%s",
-                     result.success, result.needs_otp, result.message)
+            log.info("Playwright result: success=%s otp=%s confirmed=%s msg=%s",
+                     result.success, result.needs_otp,
+                     getattr(result, "account_confirmed", False),
+                     result.message)
 
             if not result.success:
                 raise RuntimeError(result.message)
@@ -93,6 +95,11 @@ class RegistrationService:
                 detail = "تم التسجيل -- يحتاج تحقق يدوي (Gmail غير مربوط)"
             else:
                 detail = result.message or "تم إنشاء الحساب بنجاح"
+                # إضافة علامة التأكيد إذا تم التحقق من الحساب فعلاً
+                if getattr(result, "account_confirmed", False) and "✅" not in detail:
+                    detail = "✅ تم إنشاء الحساب وتأكيده"
+                elif not getattr(result, "account_confirmed", False) and "✅" not in detail and result.success:
+                    detail = "⚠️ " + detail if "⚠️" not in detail else detail
 
             self._jobs.complete(job.job_id, detail)
             self._results.save(Result(job_id=job.job_id, success=True, detail=detail))
