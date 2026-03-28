@@ -14,6 +14,7 @@ from app.site.session_cache import session_cache
 from app.site.human_behavior import human_sim
 from app.site.captcha_solver import captcha_solver
 from app.site.result_validator import subscription_validator
+from app.site.browser_warmup import browser_warmup
 
 log = get_logger(__name__)
 
@@ -318,10 +319,20 @@ class PaymentClient:
                 upgrade_url = _UPGRADE_URLS.get(domain, site_url)
                 await page.goto(upgrade_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
                 await self._wait_spa(page)
+                # تحقق أن الجلسة لا تزال صالحة (لم يتم تسجيل الخروج)
+                current = page.url.lower()
+                if any(kw in current for kw in ("login", "signin", "sign-in", "auth", "logout")):
+                    log.warning("SessionCache: session expired for %s@%s — invalidating", email[:6], domain)
+                    session_cache.invalidate(email, domain)
+                    skip_login = False
             except Exception:
+                session_cache.invalidate(email, domain)
                 skip_login = False
 
         if not skip_login:
+            # تسخين المتصفح قبل تسجيل الدخول (يبني history + cookies حيادية)
+            self._report("تحضير جلسة المتصفح...")
+            await browser_warmup.warm(context) if context else None
             login_result = await self._login(page, site_url, domain, email, password, job_id=job_id)
             if not login_result:
                 secure_logger.log_login(email, domain, False)

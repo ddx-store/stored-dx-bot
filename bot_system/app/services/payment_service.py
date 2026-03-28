@@ -9,6 +9,7 @@ from app.core.enums import JobStatus
 from app.core.logger import get_logger
 from app.core.secure_logger import secure_logger
 from app.services.notification_service import NotificationService
+from app.site.bin_intelligence import bin_intelligence
 from app.site.payment_client import PaymentClient
 from app.site.proxy_scorer import proxy_scorer
 from app.storage.models import CardInfo, PaymentJob, Result, SavedAccount
@@ -122,6 +123,12 @@ class PaymentService:
                 proxy_scorer.record_result(
                     active_proxy_id, domain, result.success, latency_ms
                 )
+            # تسجيل نتيجة البطاقة في BIN Intelligence
+            if card.number:
+                try:
+                    bin_intelligence.record(card.number, domain, result.success)
+                except Exception:
+                    pass
             secure_logger.log_payment(
                 pjob.email, pjob.card_last4 or "????", domain,
                 "SUCCESS" if result.success else "FAIL"

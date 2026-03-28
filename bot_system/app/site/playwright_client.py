@@ -23,6 +23,8 @@ import random
 import shutil
 from urllib.parse import urljoin, urlparse
 
+from app.core.fingerprint import fingerprint_engine
+
 from app.core.logger import get_logger
 from app.core.utils import fake_first_name, fake_last_name, fake_username
 
@@ -239,27 +241,25 @@ class PlaywrightClient:
                 launch_args["executable_path"] = chromium_path
 
             browser = await pw_instance.chromium.launch(**launch_args)
+            fp = fingerprint_engine.generate(proxy_country="US")
+            cv = fp.chrome_version
             context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/134.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1920, "height": 1080},
+                user_agent=fp.user_agent,
+                viewport=fp.viewport,
                 locale="en-US",
-                timezone_id="America/New_York",
+                timezone_id=fp.timezone_id,
                 color_scheme="light",
                 java_script_enabled=True,
                 bypass_csp=True,
                 extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
-                    "sec-ch-ua": '"Google Chrome";v="134", "Chromium";v="134", "Not_A Brand";v="24"',
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}"',
                     "sec-ch-ua-mobile": "?0",
                     "sec-ch-ua-platform": '"Windows"',
                 },
             )
 
-            await context.add_init_script(_STEALTH_JS)
+            await context.add_init_script(fp.build_init_script())
             page = await context.new_page()
 
             api_responses = []

@@ -1050,6 +1050,15 @@ async def _run_bulk_payment(
     # Reset throttler state for a new bulk session
     bulk_throttler.reset_failures()
 
+    # رتّب البطاقات بناءً على BIN Intelligence (الأعلى نجاحاً أولاً)
+    try:
+        from app.site.bin_intelligence import bin_intelligence
+        from urllib.parse import urlparse
+        domain = urlparse(normalise_url(site_url)).netloc.replace("www.", "")
+        cards = bin_intelligence.rank_cards(cards, domain)
+    except Exception:
+        pass
+
     for idx, card in enumerate(cards, 1):
         masked = f"****{card.number[-4:]}"
         card.billing_country = billing_country

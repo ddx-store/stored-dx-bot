@@ -17,7 +17,8 @@ from app.storage.models import Proxy
 log = get_logger(__name__)
 
 _FAILURE_THRESHOLD = 3
-_RECOVERY_SECONDS = 900
+_BASE_RECOVERY_SECONDS = 300      # 5 دقائق للفشل المعتدل
+_MAX_RECOVERY_SECONDS = 3600      # ساعة كاملة للفشل الشديد
 _LATENCY_EWM_ALPHA = 0.2
 _SUCCESS_WEIGHT = 0.70
 _LATENCY_WEIGHT = 0.30
@@ -58,14 +59,20 @@ class ProxyScorer:
             latency_score = max(0.0, 1.0 - s.avg_latency_ms / _MAX_LATENCY_MS)
             return _SUCCESS_WEIGHT * success_rate + _LATENCY_WEIGHT * latency_score
 
+    def _recovery_seconds(self, failures: int) -> float:
+        """مدة الاسترداد تتناسب مع شدة الفشل: كلما زاد الفشل، طالت المدة."""
+        factor = min(failures / _FAILURE_THRESHOLD, 6.0)
+        return min(_BASE_RECOVERY_SECONDS * factor, _MAX_RECOVERY_SECONDS)
+
     def is_available(self, proxy_id: int, domain: str = "") -> bool:
         with self._lock:
             s = self._get_stats(proxy_id)
             if s.circuit_open:
-                if time.monotonic() - s.circuit_open_at >= _RECOVERY_SECONDS:
+                required = self._recovery_seconds(s.consecutive_global_failures)
+                if time.monotonic() - s.circuit_open_at >= required:
                     s.circuit_open = False
                     s.consecutive_global_failures = 0
-                    log.info("Proxy %d circuit recovered", proxy_id)
+                    log.info("Proxy %d circuit recovered (after %.0fs)", proxy_id, required)
                 else:
                     return False
             if domain and s.site_failures.get(domain, 0) >= _FAILURE_THRESHOLD:
@@ -107,9 +114,10 @@ class ProxyScorer:
                     if not s.circuit_open:
                         s.circuit_open = True
                         s.circuit_open_at = time.monotonic()
+                        recovery = self._recovery_seconds(s.consecutive_global_failures)
                         log.warning(
-                            "Proxy %d circuit OPEN (global failures=%d)",
-                            proxy_id, s.consecutive_global_failures,
+                            "Proxy %d circuit OPEN (failures=%d, recovery=%.0fs)",
+                            proxy_id, s.consecutive_global_failures, recovery,
                         )
                 if s.site_failures[domain] >= _FAILURE_THRESHOLD:
                     log.warning(

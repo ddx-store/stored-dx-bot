@@ -158,9 +158,12 @@ def get_connection(path: str | None = None) -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
         _ensure_dir(db_path)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = sqlite3.connect(db_path, check_same_thread=False, timeout=20)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-32000")
+        conn.execute("PRAGMA temp_store=MEMORY")
         conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
     return conn
