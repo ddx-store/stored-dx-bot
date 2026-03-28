@@ -123,12 +123,22 @@ _CF_WAIT_PHRASES = [
     "verify you are human",
     "performing security",
     "just a moment",
-    "please wait",
     "enable javascript",
     "checking if the site",
     "attention required",
     "one more step",
     "security check",
+    "ddos protection",
+    "ray id",
+]
+
+# Arkose Labs / FunCaptcha indicators — مختلف تماماً عن Cloudflare
+_ARKOSE_PHRASES = [
+    "arkoselabs",
+    "funcaptcha",
+    "verify your identity",
+    "complete the challenge",
+    "confirm you're human",
 ]
 
 
@@ -160,11 +170,12 @@ _REGISTER_PATHS = [
 ]
 
 _DIRECT_AUTH_URLS = {
-    # ChatGPT signup — screen_hint=signup forces the signup screen on Auth0
-    "chatgpt.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&screen_hint=signup&prompt=create",
-    "chat.openai.com": "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD&audience=https%3A%2F%2Fapi.openai.com%2Fv1&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web&scope=openid+email+profile+offline_access+model.request+model.read+organization.read+organization.write&response_type=code&response_mode=query&state=signup&code_challenge_method=S256&screen_hint=signup&prompt=create",
+    # ChatGPT — نبدأ من الصفحة الرئيسية ونضغط Sign up (أكثر موثوقية من direct auth)
     "canva.com": "https://www.canva.com/signup",
 }
+
+# مواقع تُعالج ChatGPT بتدفق خاص عبر الصفحة الرئيسية
+_CHATGPT_HOSTS = {"chatgpt.com", "chat.openai.com"}
 
 # Keywords that appear when signup succeeded (post-auth redirect)
 _SIGNUP_SUCCESS_URLS = [
@@ -537,12 +548,21 @@ class PlaywrightClient:
             if page.url.rstrip("/") != before_url.rstrip("/"):
                 cf_ok = await self._wait_for_cf(page, max_wait=20)
                 if not cf_ok:
-                    # تحقق إذا كان Cloudflare لا يزال يحجب الصفحة
                     try:
                         body_cf = (await page.inner_text("body")).lower()
                     except Exception:
                         body_cf = ""
-                    if any(p in body_cf for p in _CF_WAIT_PHRASES):
+
+                    # Arkose Labs قبل Cloudflare — يحتاج معالجة مختلفة
+                    if await self._detect_arkose(page) or any(p in body_cf for p in _ARKOSE_PHRASES):
+                        arkose_resolved = await self._handle_arkose(page)
+                        if not arkose_resolved:
+                            return RegistrationResult(
+                                False,
+                                message="يحتاج حل Arkose captcha — فعّل CapMonster/2Captcha أو جرب لاحقاً",
+                                page_url=page.url,
+                            )
+                    elif any(p in body_cf for p in _CF_WAIT_PHRASES):
                         return RegistrationResult(
                             False,
                             message="Cloudflare تحجب الصفحة -- جرب بروكسي مختلف أو حاول لاحقاً",
@@ -1553,6 +1573,10 @@ class PlaywrightClient:
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         host = parsed.netloc.lower().lstrip("www.")
 
+        # ---- تدفق خاص لـ ChatGPT ----
+        if host in _CHATGPT_HOSTS:
+            return await self._navigate_chatgpt_signup(page)
+
         direct_auth = _DIRECT_AUTH_URLS.get(host)
         if direct_auth:
             log.info("-> Using direct auth URL for %s", host)
@@ -1926,6 +1950,12 @@ class PlaywrightClient:
         return count
 
     async def _has_email_only_form(self, page) -> bool:
+        # رفض صفحات platform.openai.com/login (API platform وليس ChatGPT)
+        current_url = page.url.lower()
+        if "platform.openai.com/login" in current_url:
+            log.debug("_has_email_only_form: rejecting platform.openai.com/login")
+            return False
+
         email_input = await page.query_selector(
             'input[type="email"], input[name="email"], '
             'input[placeholder*="email" i], input[placeholder*="mail" i], '
@@ -2398,6 +2428,162 @@ class PlaywrightClient:
             message="تم إرسال النموذج -- تحقق من النتيجة",
             page_url=current_url
         )
+
+    # ================================================================
+    # ChatGPT-Specific Signup Flow
+    # ================================================================
+
+    async def _navigate_chatgpt_signup(self, page) -> bool:
+        """
+        تدفق التسجيل الخاص بـ ChatGPT:
+        1. فتح chatgpt.com
+        2. الضغط على "Sign up"
+        3. انتظار صفحة auth.openai.com مع screen_hint=signup
+        """
+        self._report("فتح صفحة ChatGPT...")
+        try:
+            await page.goto("https://chatgpt.com", timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+        except Exception as exc:
+            log.warning("ChatGPT homepage failed: %s", exc)
+            return False
+
+        await asyncio.sleep(2)
+        await self._wait_for_cf(page, max_wait=15)
+        await self._wait_for_spa(page)
+
+        # البحث عن زر Sign up
+        signup_selectors = [
+            'a[href*="signup"], a[href*="sign-up"], a[href*="register"]',
+            'button:has-text("Sign up")',
+            'a:has-text("Sign up")',
+            '[data-testid*="signup"]',
+            '[data-testid*="sign-up"]',
+        ]
+        clicked = False
+        for sel in signup_selectors:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=500):
+                    await el.click()
+                    clicked = True
+                    log.info("ChatGPT: clicked signup via selector '%s'", sel[:40])
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            # محاولة بالنص
+            for text in ["Sign up", "Get started", "Create account", "إنشاء حساب"]:
+                try:
+                    btn = page.get_by_text(text, exact=False).first
+                    if await btn.is_visible(timeout=500):
+                        await btn.click()
+                        clicked = True
+                        log.info("ChatGPT: clicked '%s' button", text)
+                        break
+                except Exception:
+                    continue
+
+        if not clicked:
+            log.warning("ChatGPT: no signup button found on homepage")
+            # محاولة مباشرة بـ URL البديل
+            return await self._try_chatgpt_direct_signup(page)
+
+        await asyncio.sleep(2)
+        await self._wait_for_spa(page)
+        await self._wait_for_cf(page, max_wait=15)
+
+        current_url = page.url
+        log.info("ChatGPT: after signup click, URL=%s", current_url[:100])
+
+        # إذا وصلنا لصفحة auth.openai.com أو chatgpt.com/auth = نجاح
+        if "auth.openai.com" in current_url or "chatgpt.com/auth" in current_url:
+            if await self._has_email_only_form(page) or await self._has_fillable_form(page):
+                return True
+            # انتظر تحميل الـ form
+            await asyncio.sleep(2)
+            if await self._has_email_only_form(page):
+                return True
+
+        if await self._has_email_only_form(page) or await self._has_fillable_form(page):
+            return True
+
+        # fallback
+        return await self._try_chatgpt_direct_signup(page)
+
+    async def _try_chatgpt_direct_signup(self, page) -> bool:
+        """محاولة مباشرة عبر URL التسجيل البديل لـ ChatGPT."""
+        # قائمة URLs يجب تجربتها بالتسلسل
+        signup_urls = [
+            "https://chatgpt.com/auth/login?action=signup",
+            "https://auth.openai.com/u/signup",
+            "https://auth.openai.com/authorize?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD"
+            "&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web"
+            "&response_type=code&scope=openid+email+profile+offline_access"
+            "&state=signup&screen_hint=signup",
+        ]
+        for url in signup_urls:
+            try:
+                resp = await page.goto(url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
+                await asyncio.sleep(2)
+                await self._wait_for_spa(page)
+                await self._wait_for_cf(page, max_wait=12)
+
+                current = page.url
+                log.info("ChatGPT direct signup: tried %s → landed at %s", url[:60], current[:80])
+
+                # رفض صفحة platform.openai.com/login (صفحة API وليس ChatGPT)
+                if "platform.openai.com/login" in current:
+                    log.warning("ChatGPT: landed on platform login (wrong page), skipping")
+                    continue
+
+                if await self._has_email_only_form(page) or await self._has_fillable_form(page):
+                    return True
+            except Exception as exc:
+                log.debug("ChatGPT direct signup %s failed: %s", url[:50], exc)
+
+        return False
+
+    async def _detect_arkose(self, page) -> bool:
+        """كشف Arkose Labs (FunCaptcha) في الصفحة الحالية."""
+        try:
+            body = (await page.inner_text("body")).lower()
+            if any(p in body for p in _ARKOSE_PHRASES):
+                return True
+        except Exception:
+            pass
+        # فحص الـ iframes
+        for frame in page.frames:
+            url = (frame.url or "").lower()
+            if "arkoselabs" in url or "funcaptcha" in url or "arkose" in url:
+                log.info("Arkose Labs iframe detected: %s", url[:80])
+                return True
+        return False
+
+    async def _handle_arkose(self, page) -> bool:
+        """
+        محاولة حل أو الانتظار لـ Arkose.
+        يُرجع True إذا اختفى التحدي، False إذا لم يُحل.
+        """
+        log.info("Arkose Labs detected — waiting up to 30s for auto-solve or timeout")
+        self._report("⚠️ تحدي Arkose Labs — جاري الانتظار...")
+
+        # انتظر حتى 30 ثانية لأن بعض التحديات تُحل تلقائياً
+        for _ in range(10):
+            await asyncio.sleep(3)
+            if not await self._detect_arkose(page):
+                log.info("Arkose resolved after wait")
+                return True
+            # تحقق إذا انتقلنا لصفحة أخرى (يعني تجاوز التحدي)
+            url = page.url
+            if any(kw in url for kw in ["password", "name", "profile", "chatgpt.com/?", "/c/"]):
+                return True
+        log.warning("Arkose challenge did not resolve")
+        return False
+
+    # ================================================================
+    # Account Verification
+    # ================================================================
 
     async def _post_registration_verify(self, page, site_url: str, email: str) -> bool:
         """

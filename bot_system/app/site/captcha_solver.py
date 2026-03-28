@@ -73,6 +73,10 @@ class CaptchaSolver:
             if "challenges.cloudflare.com" in url:
                 site_key = await self._extract_turnstile_key(page)
                 return "turnstile", site_key
+            # Arkose Labs / FunCaptcha
+            if "arkoselabs.com" in url or "funcaptcha.com" in url:
+                site_key = await self._extract_arkose_key(page)
+                return "arkose", site_key
 
         # Body text detection fallback
         try:
@@ -83,10 +87,34 @@ class CaptchaSolver:
             if "recaptcha" in body:
                 site_key = await self._extract_recaptcha_key(page)
                 return "recaptcha_v2", site_key
+            if "arkoselabs" in body or "funcaptcha" in body:
+                site_key = await self._extract_arkose_key(page)
+                return "arkose", site_key
         except Exception:
             pass
 
         return None, None
+
+    async def _extract_arkose_key(self, page) -> Optional[str]:
+        """استخراج Arkose Labs public key."""
+        try:
+            key = await page.evaluate("""
+                () => {
+                    // Data attribute
+                    const el = document.querySelector('[data-pkey], [data-public-key]');
+                    if (el) return el.getAttribute('data-pkey') || el.getAttribute('data-public-key');
+                    // Script content
+                    const scripts = document.querySelectorAll('script');
+                    for (const s of scripts) {
+                        const m = (s.textContent || '').match(/["']?publicKey["']?\\s*[=:]\\s*["']([0-9A-F-]{30,})/i);
+                        if (m) return m[1];
+                    }
+                    return null;
+                }
+            """)
+            return key
+        except Exception:
+            return None
 
     async def _extract_hcaptcha_key(self, page) -> Optional[str]:
         try:
@@ -152,6 +180,7 @@ class CaptchaSolver:
             "hcaptcha": "HCaptchaTaskProxyless",
             "recaptcha_v2": "NoCaptchaTaskProxyless",
             "turnstile": "TurnstileTaskProxyless",
+            "arkose": "FunCaptchaTaskProxyless",
         }
         task_type = task_map.get(captcha_type, "HCaptchaTaskProxyless")
         payload = {
@@ -178,9 +207,18 @@ class CaptchaSolver:
 
     async def _solve_2captcha(self, captcha_type: str, site_key: str, page_url: str) -> Optional[str]:
         from app.site.tls_client import TLSClient
-        method_map = {"hcaptcha": "hcaptcha", "recaptcha_v2": "userrecaptcha", "turnstile": "turnstile"}
+        method_map = {
+            "hcaptcha": "hcaptcha",
+            "recaptcha_v2": "userrecaptcha",
+            "turnstile": "turnstile",
+            "arkose": "funcaptcha",
+        }
         method = method_map.get(captcha_type, "hcaptcha")
-        params = {"key": self._2captcha_key, "method": method, "sitekey": site_key, "pageurl": page_url, "json": 1}
+        params = {"key": self._2captcha_key, "method": method, "publickey": site_key,
+                  "sitekey": site_key, "pageurl": page_url, "json": 1}
+        if captcha_type == "arkose":
+            params["method"] = "funcaptcha"
+            params["publickey"] = site_key
         async with TLSClient() as client:
             r = await client.get(_2CAPTCHA_URL, params=params, timeout=15)
             data = await r.json()
