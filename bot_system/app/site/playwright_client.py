@@ -588,11 +588,11 @@ class PlaywrightClient:
 
             if page.url.rstrip("/") != before_url.rstrip("/"):
                 new_url = page.url.lower()
-                # انتظار تحميل كامل عند الانتقال لصفحات auth
+                log.info("-> URL changed: %s → %s", before_url[:60], page.url[:80])
                 _AUTH_HOSTS = ["auth.openai.com", "auth0.com", "accounts.google.com",
                                "login.microsoftonline.com"]
                 if any(h in new_url for h in _AUTH_HOSTS):
-                    log.info("-> Auth redirect detected: %s — waiting for load...", page.url[:80])
+                    log.info("-> Auth redirect detected: %s — waiting for networkidle + form...", page.url[:80])
                     try:
                         await page.wait_for_load_state("networkidle", timeout=15000)
                     except Exception:
@@ -601,6 +601,7 @@ class PlaywrightClient:
                         except Exception:
                             pass
                     await asyncio.sleep(2)
+                    await self._log_page_state(page, "post-auth-redirect")
 
                 cf_ok = await self._wait_for_cf(page, max_wait=20)
                 if not cf_ok:
@@ -1564,15 +1565,53 @@ class PlaywrightClient:
             log.warning("Verification link error: %s", exc)
             return None
 
+    async def _count_frame_inputs(self, page) -> int:
+        """عد الحقول المرئية في جميع الإطارات (main + iframes)."""
+        total = 0
+        for frame in page.frames:
+            try:
+                inputs = await frame.query_selector_all("input")
+                for inp in inputs:
+                    try:
+                        if await inp.is_visible():
+                            t = (await inp.get_attribute("type") or "text").lower()
+                            if t not in ("hidden", "submit", "button", "file", "image", "reset"):
+                                total += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return total
+
     async def _wait_for_inputs(self, page, max_wait: float = 5.0) -> int:
         elapsed = 0.0
         interval = 1.0
+        is_auth_page = any(h in page.url.lower() for h in [
+            "auth.openai.com", "auth0.com", "accounts.google.com"
+        ])
         while elapsed < max_wait:
             count = await self._count_visible_inputs(page)
             if count > 0:
                 return count
+            if is_auth_page:
+                frame_count = await self._count_frame_inputs(page)
+                if frame_count > 0:
+                    log.info("Found %d inputs in frames on auth page", frame_count)
+                    return frame_count
             await asyncio.sleep(interval)
             elapsed += interval
+
+            if is_auth_page and elapsed == 3.0:
+                try:
+                    await page.wait_for_selector(
+                        'input[type="email"], input[type="password"], input[name="email"], input[name="password"]',
+                        state="visible",
+                        timeout=int((max_wait - elapsed) * 1000),
+                    )
+                    return await self._count_visible_inputs(page) or 1
+                except Exception:
+                    pass
+                break
         return 0
 
     async def _try_continue_with_password(self, page) -> bool:
@@ -2663,10 +2702,21 @@ class PlaywrightClient:
         return False
 
     async def _log_page_state(self, page, tag: str = "") -> None:
-        """تسجيل حالة الصفحة الحالية للتشخيص."""
+        """تسجيل حالة الصفحة الحالية للتشخيص — يشمل HTML وframes."""
         try:
             url = page.url
-            body = (await page.inner_text("body"))[:400]
+            body = ""
+            try:
+                body = (await page.inner_text("body"))[:400]
+            except Exception:
+                pass
+
+            html_snippet = ""
+            try:
+                html_snippet = (await page.content())[:800]
+            except Exception:
+                pass
+
             inputs = await page.query_selector_all("input")
             visible_inputs = []
             for inp in inputs:
@@ -2677,8 +2727,24 @@ class PlaywrightClient:
                         visible_inputs.append(f"{t}:{n}")
                 except Exception:
                     pass
-            log.info("[%s] URL=%s | inputs=%s | body=%s",
-                     tag, url[:100], visible_inputs, body[:200].replace("\n", " "))
+
+            frames_info = []
+            for f in page.frames:
+                f_url = f.url or ""
+                if f_url and f_url != url and not f_url.startswith("about:"):
+                    f_inputs = 0
+                    try:
+                        f_inputs = len(await f.query_selector_all("input"))
+                    except Exception:
+                        pass
+                    frames_info.append(f"{f_url[:60]}(inputs={f_inputs})")
+
+            log.info("[%s] URL=%s | inputs=%s | frames=%s | body=%s",
+                     tag, url[:100], visible_inputs,
+                     frames_info[:5] if frames_info else "none",
+                     body[:200].replace("\n", " "))
+            if not body.strip() and html_snippet:
+                log.info("[%s] HTML=%s", tag, html_snippet[:500].replace("\n", " "))
         except Exception as exc:
             log.debug("[%s] log_page_state error: %s", tag, exc)
 
