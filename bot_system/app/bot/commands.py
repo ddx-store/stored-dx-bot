@@ -46,44 +46,13 @@ def load_all_sessions() -> None:
         log.warning("Could not restore sessions: %s", e)
 
 
-PRESET_SITES = [
-    {"label": "ChatGPT", "url": "chatgpt.com", "icon": "🤖"},
-    {"label": "Canva", "url": "canva.com", "icon": "🎨"},
-    {"label": "Google", "url": "google.com", "icon": "🔍"},
-    {"label": "Outlook", "url": "outlook.com", "icon": "📧"},
-    {"label": "GitHub", "url": "github.com", "icon": "💻"},
-    {"label": "Discord", "url": "discord.com", "icon": "🎮"},
-    {"label": "Twitter/X", "url": "x.com", "icon": "🐦"},
-]
-
-PAYMENT_SITES = [
-    {"label": "ChatGPT Plus", "url": "chatgpt.com", "icon": "🤖"},
-    {"label": "Canva Pro", "url": "canva.com", "icon": "🎨"},
-    {"label": "ProtonVPN", "url": "protonvpn.com", "icon": "🔒"},
-    {"label": "Pixlr", "url": "pixlr.com", "icon": "🖼"},
-    {"label": "Replit", "url": "replit.com", "icon": "💻"},
-]
+SITE_URL = "chatgpt.com"
+SITE_LABEL = "🤖 ChatGPT"
 
 SITE_PLANS = {
     "chatgpt.com": [
         {"label": "Plus — $20/شهر", "value": "plus"},
         {"label": "Team — $25/شهر", "value": "team"},
-    ],
-    "canva.com": [
-        {"label": "Pro — $15/شهر", "value": "pro"},
-        {"label": "Teams — $10/شهر", "value": "teams"},
-    ],
-    "protonvpn.com": [
-        {"label": "Plus — $10/شهر", "value": "plus"},
-        {"label": "Unlimited — $12/شهر", "value": "unlimited"},
-    ],
-    "pixlr.com": [
-        {"label": "Plus — $5/شهر", "value": "plus"},
-        {"label": "Premium — $13/شهر", "value": "premium"},
-    ],
-    "replit.com": [
-        {"label": "Core — $15/شهر", "value": "core"},
-        {"label": "Teams — $20/شهر", "value": "teams"},
     ],
 }
 
@@ -92,9 +61,9 @@ BILLING_COUNTRIES = [
     ("🇦🇪 AE", "AE"), ("🇩🇪 DE", "DE"), ("🇫🇷 FR", "FR"),
 ]
 
-_pending_site = {}
 _pending_payment = {}
 _pending_proxy = {}
+_last_email = {}
 
 
 def _build_proxy_menu(proxies: list) -> InlineKeyboardMarkup:
@@ -148,47 +117,10 @@ def _parse_create_args(message_text: str):
 
 def _build_home_menu():
     keyboard = [
-        [InlineKeyboardButton("📝  إنشاء حساب", callback_data="menu:register")],
         [InlineKeyboardButton("💳  تفعيل حساب", callback_data="menu:activate")],
         [InlineKeyboardButton("📋  حساباتي", callback_data="menu:accounts")],
         [InlineKeyboardButton("🌐  البروكسيات", callback_data="menu:proxies")],
     ]
-    return InlineKeyboardMarkup(keyboard)
-
-
-def _build_register_sites_menu():
-    keyboard = []
-    row = []
-    for i, site in enumerate(PRESET_SITES):
-        row.append(InlineKeyboardButton(
-            f"{site['icon']} {site['label']}",
-            callback_data=f"reg:{site['url']}"
-        ))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="reg:custom")])
-    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:home")])
-    return InlineKeyboardMarkup(keyboard)
-
-
-def _build_payment_sites_menu():
-    keyboard = []
-    row = []
-    for i, site in enumerate(PAYMENT_SITES):
-        row.append(InlineKeyboardButton(
-            f"{site['icon']} {site['label']}",
-            callback_data=f"pay:{site['url']}"
-        ))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("🌐 موقع اخر ...", callback_data="pay:custom")])
-    keyboard.append([InlineKeyboardButton("◀ رجوع", callback_data="back:home")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -221,33 +153,22 @@ def _home_text():
         "║       STORED DX BOT         ║\n"
         "╠══════════════════════════════╣\n"
         "║                              ║\n"
-        "║   📝  إنشاء حساب جديد        ║\n"
-        "║   💳  تفعيل حساب (اشتراك)    ║\n"
-        "║   📋  حساباتي المحفوظة       ║\n"
+        "║   🤖  ChatGPT فقط            ║\n"
+        "║                              ║\n"
+        "║   📧  ارسل الايميل مباشرة     ║\n"
+        "║   لبدء إنشاء حساب ChatGPT    ║\n"
         "║                              ║\n"
         "╚══════════════════════════════╝\n"
-        "\n"
-        "  اختر الخدمة المطلوبة:\n"
-    )
-
-
-def _register_text():
-    return (
-        "╔══════════════════════════════╗\n"
-        "║   📝  إنشاء حساب جديد        ║\n"
-        "╚══════════════════════════════╝\n"
-        "\n"
-        "  اختر الموقع:\n"
     )
 
 
 def _activate_text():
     return (
         "╔══════════════════════════════╗\n"
-        "║   💳  تفعيل حساب (اشتراك)    ║\n"
+        "║   💳  تفعيل حساب ChatGPT     ║\n"
         "╚══════════════════════════════╝\n"
         "\n"
-        "  اختر الموقع:\n"
+        "  📋 اختر الخطة:\n"
     )
 
 
@@ -257,7 +178,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_allowed(update.effective_user.id):
             await update.message.reply_text("غير مصرح لك.")
             return
-        _pending_site.pop(update.effective_user.id, None)
         _pending_payment.pop(update.effective_user.id, None)
         await update.message.reply_text(_home_text(), reply_markup=_build_home_menu())
     except Exception as exc:
@@ -271,27 +191,22 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "║         المساعدة             ║\n"
             "╚══════════════════════════════╝\n"
             "\n"
-            "  📝 إنشاء حساب:\n"
+            "  📝 إنشاء حساب ChatGPT:\n"
             "  ───────────────\n"
-            "  1. اضغط /start\n"
-            "  2. اختر  إنشاء حساب\n"
-            "  3. اختر الموقع\n"
-            "  4. ارسل الايميل\n"
-            "  5. انتظر النتيجة\n"
+            "  ارسل الايميل مباشرة وبيبدأ\n"
+            "  التسجيل تلقائياً\n"
             "\n"
             "  💳 تفعيل حساب:\n"
             "  ───────────────\n"
-            "  1. اضغط /start\n"
-            "  2. اختر  تفعيل حساب\n"
-            "  3. اختر الموقع\n"
-            "  4. ارسل الايميل\n"
-            "  5. ارسل الباسوورد\n"
-            "  6. ارسل بيانات البطاقة\n"
+            "  1. اضغط /pay\n"
+            "  2. اختر الخطة\n"
+            "  3. ارسل الايميل\n"
+            "  4. ارسل الباسوورد\n"
+            "  5. ارسل بيانات البطاقة\n"
             "\n"
             "  الاوامر:\n"
             "  ───────────────\n"
             "  /start - القائمة الرئيسية\n"
-            "  /create site.com email\n"
             "  /pay - تفعيل حساب\n"
             "  /cancel - إلغاء العمليات\n"
             "  /accounts - حساباتي المحفوظة\n"
@@ -307,9 +222,13 @@ async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not _is_allowed(update.effective_user.id):
             await update.message.reply_text("غير مصرح لك.")
             return
-        _pending_site.pop(update.effective_user.id, None)
-        _pending_payment.pop(update.effective_user.id, None)
-        await update.message.reply_text(_activate_text(), reply_markup=_build_payment_sites_menu())
+        _pending_payment[update.effective_user.id] = {
+            "step": "plan", "site_url": SITE_URL, "label": SITE_LABEL
+        }
+        await update.message.reply_text(
+            _activate_text(),
+            reply_markup=_build_plan_menu(SITE_URL, back_data="back:home"),
+        )
     except Exception as exc:
         log.error("cmd_pay error: %s\n%s", exc, traceback.format_exc())
 
@@ -350,89 +269,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     log.info("callback_handler: user=%s data=%s", user_id, data)
 
     if data == "back:home":
-        _pending_site.pop(user_id, None)
         _pending_payment.pop(user_id, None)
         await query.edit_message_text(_home_text(), reply_markup=_build_home_menu())
         return
 
-    if data == "menu:register":
-        _pending_payment.pop(user_id, None)
-        await query.edit_message_text(_register_text(), reply_markup=_build_register_sites_menu())
-        return
-
     if data == "menu:activate":
-        _pending_site.pop(user_id, None)
-        await query.edit_message_text(_activate_text(), reply_markup=_build_payment_sites_menu())
-        return
-
-    if data == "back:regsites":
-        _pending_site.pop(user_id, None)
-        await query.edit_message_text(_register_text(), reply_markup=_build_register_sites_menu())
+        _pending_payment[user_id] = {
+            "step": "plan", "site_url": SITE_URL, "label": SITE_LABEL
+        }
+        await query.edit_message_text(
+            _activate_text(),
+            reply_markup=_build_plan_menu(SITE_URL, back_data="back:home"),
+        )
         return
 
     if data == "back:paysites":
         _pending_payment.pop(user_id, None)
-        await query.edit_message_text(_activate_text(), reply_markup=_build_payment_sites_menu())
-        return
-
-    if data == "reg:custom":
-        _pending_site[user_id] = "__custom__"
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:regsites")]]
+        _pending_payment[user_id] = {
+            "step": "plan", "site_url": SITE_URL, "label": SITE_LABEL
+        }
         await query.edit_message_text(
-            "╔══════════════════════════════╗\n"
-            "║   📝  موقع مخصص              ║\n"
-            "╚══════════════════════════════╝\n"
-            "\n"
-            "  ارسل الموقع والايميل:\n"
-            "\n"
-            "  مثال:\n"
-            "  site.com email@example.com\n",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    if data.startswith("reg:"):
-        site_url = data[4:]
-        site_label = site_url
-        for ps in PRESET_SITES:
-            if ps["url"] == site_url:
-                site_label = f"{ps['icon']} {ps['label']}"
-                break
-
-        _pending_site[user_id] = site_url
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:regsites")]]
-        await query.edit_message_text(
-            "╔══════════════════════════════╗\n"
-            f"║  📝  {site_label}\n"
-            "╚══════════════════════════════╝\n"
-            "\n"
-            "  📧 ارسل الايميل:\n",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    if data == "pay:custom":
-        _pending_payment[user_id] = {"step": "custom_site"}
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:paysites")]]
-        await query.edit_message_text(
-            "╔══════════════════════════════╗\n"
-            "║   💳  موقع مخصص              ║\n"
-            "╚══════════════════════════════╝\n"
-            "\n"
-            "  ارسل رابط الموقع:\n"
-            "  مثال: site.com\n",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            _activate_text(),
+            reply_markup=_build_plan_menu(SITE_URL, back_data="back:home"),
         )
         return
 
     if data == "menu:accounts":
-        _pending_site.pop(user_id, None)
         _pending_payment.pop(user_id, None)
         await _show_accounts(query)
         return
 
     if data == "menu:proxies":
-        _pending_site.pop(user_id, None)
         _pending_payment.pop(user_id, None)
         from app.storage.repositories import ProxyRepository
         proxies = ProxyRepository().list_all()
@@ -512,59 +379,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    if data.startswith("retry_reg:"):
-        site_url = data[10:]
-        _pending_site[user_id] = site_url
-        site_label = site_url
-        for ps in PRESET_SITES:
-            if ps["url"] == site_url:
-                site_label = f"{ps['icon']} {ps['label']}"
-                break
-        keyboard = [[InlineKeyboardButton("◀ رجوع", callback_data="back:regsites")]]
+    if data == "retry_reg":
+        email = _last_email.get(user_id)
+        if not email:
+            await query.edit_message_text(
+                "  ❌ لا يوجد ايميل سابق\n  ارسل الايميل مباشرة لبدء التسجيل."
+            )
+            return
         await query.edit_message_text(
-            "╔══════════════════════════════╗\n"
-            f"║  🔄  إعادة - {site_label}\n"
-            "╚══════════════════════════════╝\n"
-            "\n"
-            "  📧 ارسل الايميل:\n",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            f"  🔄 إعادة محاولة التسجيل...\n  📧 {email}"
         )
+        await _start_job_from_callback(query, SITE_URL, email)
         return
 
     if data.startswith("retry_pay:"):
         site_url = data[10:]
-        site_label = site_url
-        for ps in PAYMENT_SITES:
-            if ps["url"] == site_url:
-                site_label = f"{ps['icon']} {ps['label']}"
-                break
-        _pending_payment[user_id] = {"step": "plan", "site_url": site_url, "label": site_label}
+        _pending_payment[user_id] = {
+            "step": "plan", "site_url": SITE_URL, "label": SITE_LABEL
+        }
         await query.edit_message_text(
             "╔══════════════════════════════╗\n"
-            f"║  🔄  إعادة - {site_label}\n"
+            f"║  🔄  إعادة - {SITE_LABEL}\n"
             "╚══════════════════════════════╝\n"
             "\n"
             "  📋 اختر الخطة:\n",
-            reply_markup=_build_plan_menu(site_url),
-        )
-        return
-
-    if data.startswith("pay:"):
-        site_val = data[4:]
-        site_label = site_val
-        for ps in PAYMENT_SITES:
-            if ps["url"] == site_val:
-                site_label = f"{ps['icon']} {ps['label']}"
-                break
-
-        _pending_payment[user_id] = {"step": "plan", "site_url": site_val, "label": site_label}
-        await query.edit_message_text(
-            "╔══════════════════════════════╗\n"
-            f"║  💳  {site_label}\n"
-            "╚══════════════════════════════╝\n"
-            "\n"
-            "  📋 اختر الخطة:\n",
-            reply_markup=_build_plan_menu(site_val),
+            reply_markup=_build_plan_menu(SITE_URL, back_data="back:home"),
         )
         return
 
@@ -665,81 +504,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _handle_payment_text(update, user.id, text, payment)
         return
 
-    pending = _pending_site.get(user.id)
-
-    if pending == "__custom__":
-        _pending_site.pop(user.id, None)
-        email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
-        if not email_match:
-            await update.message.reply_text("ما لقيت ايميل. ارسل الموقع + الايميل.")
-            return
-
-        email = email_match.group(0).lower()
-        remainder = text[:email_match.start()].strip() + " " + text[email_match.end():].strip()
-        remainder = remainder.strip()
-
-        url_match = re.search(r"(https?://\S+)", remainder)
-        if url_match:
-            raw_site = url_match.group(1)
-        else:
-            parts = remainder.split()
-            if parts:
-                raw_site = parts[0]
-            else:
-                await update.message.reply_text("ارسل رابط الموقع مع الايميل.")
-                return
-
-        raw_site = raw_site.rstrip("/.,;:!?")
-        await _start_job(update, raw_site, email)
+    if is_valid_email(text):
+        _last_email[user.id] = text.lower()
+        await _start_job(update, SITE_URL, text.lower())
         return
 
-    if pending and pending != "__custom__":
-        _pending_site.pop(user.id, None)
-        email = text.strip()
-        if not is_valid_email(email):
-            await update.message.reply_text(f"  ❌  {email}\n  هذا مو ايميل صحيح.")
-            return
-        await _start_job(update, pending, email)
-        return
-
-    log.info("Received text from user=%s: %s", user.id, text[:100])
+    log.info("Received text from user=%s (not email): %s", user.id, text[:100])
 
 
 async def _handle_payment_text(update: Update, user_id: int, text: str, payment: dict) -> None:
     step = payment.get("step", "")
-
-    if step == "custom_site":
-        raw = text.strip().split()[0] if text.strip() else ""
-        if not raw:
-            await update.message.reply_text("ارسل رابط الموقع.")
-            return
-        raw = raw.rstrip("/.,;:!?")
-        payment["site_url"] = raw
-        payment["label"] = raw
-        payment["step"] = "plan"
-        _save_session(user_id, payment)
-        plans = SITE_PLANS.get(raw, [])
-        if plans:
-            await update.message.reply_text(
-                "╔══════════════════════════════╗\n"
-                f"║  💳  {raw}\n"
-                "╚══════════════════════════════╝\n"
-                "\n"
-                "  📋 اختر الخطة:\n",
-                reply_markup=_build_plan_menu(raw),
-            )
-        else:
-            payment["step"] = "plan_custom"
-            _save_session(user_id, payment)
-            await update.message.reply_text(
-                "╔══════════════════════════════╗\n"
-                f"║  💳  {raw}\n"
-                "╚══════════════════════════════╝\n"
-                "\n"
-                "  📋 ارسل اسم الخطة (مثال: pro, plus, premium)\n"
-                "  أو ارسل 0 إذا ما تعرف:\n"
-            )
-        return
 
     if step == "plan_custom":
         plan_val = text.strip()
@@ -1188,13 +962,13 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text("غير مصرح لك.")
             return
 
-        raw_site, email = _parse_create_args(update.message.text or "")
+        _, email = _parse_create_args(update.message.text or "")
 
-        if not raw_site or not email:
+        if not email:
             await update.message.reply_text(
                 "  الاستخدام:\n"
-                "  /create site.com email@example.com\n\n"
-                "  او اضغط /start"
+                "  /create email@example.com\n\n"
+                "  او ارسل الايميل مباشرة"
             )
             return
 
@@ -1202,7 +976,7 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text(f"  ❌  {email} ليس ايميل صحيح.")
             return
 
-        await _start_job(update, raw_site, email)
+        await _start_job(update, SITE_URL, email)
 
     except Exception as exc:
         log.error("cmd_create CRASHED: %s\n%s", exc, traceback.format_exc())
@@ -1214,6 +988,9 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def _start_job(update: Update, raw_site: str, email: str):
     from app.jobs.scheduler import scheduler
+
+    user_id = update.effective_user.id
+    _last_email[user_id] = email
 
     if scheduler.is_at_limit(update.effective_chat.id):
         await update.message.reply_text(
@@ -1236,6 +1013,38 @@ async def _start_job(update: Update, raw_site: str, email: str):
 
     scheduler.submit(job, config.FIXED_PASSWORD)
     log.info("Job submitted to scheduler: %s", job.job_id)
+
+
+async def _start_job_from_callback(query, raw_site: str, email: str):
+    from app.jobs.scheduler import scheduler
+
+    chat_id = query.message.chat_id
+    user_id = query.from_user.id
+    _last_email[user_id] = email
+
+    if scheduler.is_at_limit(chat_id):
+        from app.bot.telegram_client import send_message
+        send_message(
+            chat_id,
+            f"  ⚠️  عندك عمليات جارية (الحد الاقصى {config.MAX_CONCURRENT_JOBS})\n"
+            "  انتظر حتى تنتهي او استخدم /cancel\n"
+        )
+        return
+
+    site_url = normalise_url(raw_site)
+
+    from app.jobs.job_manager import JobManager
+    job_manager = JobManager()
+
+    job = job_manager.create_job(
+        email=email,
+        site_url=site_url,
+        chat_id=chat_id,
+    )
+    log.info("Job created (retry): id=%s email=%s site=%s", job.job_id, email, site_url)
+
+    scheduler.submit(job, config.FIXED_PASSWORD)
+    log.info("Job submitted to scheduler (retry): %s", job.job_id)
 
 
 async def _start_payment_job(update: Update, site_url: str, email: str, password: str, card, plan_name: str = ""):
@@ -1343,7 +1152,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await update.message.reply_text("غير مصرح.")
             return
 
-        _pending_site.pop(user.id, None)
         _pending_payment.pop(user.id, None)
 
         from app.jobs.scheduler import scheduler

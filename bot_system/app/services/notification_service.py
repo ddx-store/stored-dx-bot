@@ -230,6 +230,17 @@ class NotificationService:
                 [InlineKeyboardButton("◀ القائمة الرئيسية", callback_data="back:home")]
             ])
             progress.send_or_update(reply_markup=keyboard)
+
+            notify_text = (
+                "🔔 تم إنشاء الحساب بنجاح!\n"
+                "╔══════════════════════════════╗\n"
+                f"  🌐  {job.site_url}\n"
+                f"  📧  {job.email}\n"
+                f"  ✅  {message}\n"
+                "╚══════════════════════════════╝"
+            )
+            send_message(job.chat_id, notify_text)
+
             _cleanup(job.job_id)
         except Exception as exc:
             log.error("Notification complete failed for job %s: %s", job.job_id, exc)
@@ -256,12 +267,17 @@ class NotificationService:
             is_cancel = "إلغاء" in message or "cancel" in message.lower()
             buttons = []
             if not is_cancel:
-                site_url = getattr(job, "site_url", "")
-                if site_url:
-                    prefix = "retry_pay" if is_payment else "retry_reg"
+                if is_payment:
+                    site_url = getattr(job, "site_url", "")
+                    if site_url:
+                        buttons.append([InlineKeyboardButton(
+                            "🔄 إعادة المحاولة",
+                            callback_data=f"retry_pay:{site_url}"
+                        )])
+                else:
                     buttons.append([InlineKeyboardButton(
                         "🔄 إعادة المحاولة",
-                        callback_data=f"{prefix}:{site_url}"
+                        callback_data="retry_reg"
                     )])
             buttons.append([InlineKeyboardButton("◀ القائمة الرئيسية", callback_data="back:home")])
             keyboard = InlineKeyboardMarkup(buttons)
