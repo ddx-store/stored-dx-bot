@@ -521,6 +521,12 @@ class PlaywrightClient:
                            first, last, username, phone, api_responses):
         self._report(f"البحث عن صفحة التسجيل في {site_url}")
 
+        parsed_host = urlparse(site_url).netloc.lower().lstrip("www.")
+        if parsed_host in _CHATGPT_HOSTS:
+            return await self._handle_chatgpt_registration(
+                page, email, password, first, last, username, phone, api_responses
+            )
+
         reg_found = await self._navigate_to_register(page, site_url)
 
         if not reg_found:
@@ -1703,10 +1709,6 @@ class PlaywrightClient:
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         host = parsed.netloc.lower().lstrip("www.")
 
-        # ---- تدفق خاص لـ ChatGPT ----
-        if host in _CHATGPT_HOSTS:
-            return await self._navigate_chatgpt_signup(page)
-
         direct_auth = _DIRECT_AUTH_URLS.get(host)
         if direct_auth:
             log.info("-> Using direct auth URL for %s", host)
@@ -2196,6 +2198,16 @@ class PlaywrightClient:
 
     async def _smart_fill(self, page, email, password, first, last, username, phone) -> int:
         inputs = await page.query_selector_all("input")
+
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                frame_inputs = await frame.query_selector_all("input")
+                inputs.extend(frame_inputs)
+            except Exception:
+                pass
+
         filled = []
         filled_types = set()
 
@@ -2581,7 +2593,7 @@ class PlaywrightClient:
     )
 
     async def _simulate_human(self, page, duration: float = 2.0) -> None:
-        """محاكاة سلوك بشري — حركة ماوس + تمرير + نقرات عشوائية."""
+        """محاكاة سلوك بشري — حركة ماوس + تمرير فقط (بدون نقرات عشوائية)."""
         try:
             vw = page.viewport_size or {"width": 1920, "height": 1080}
             w, h = vw["width"], vw["height"]
@@ -2589,30 +2601,25 @@ class PlaywrightClient:
 
             cx, cy = w // 2, h // 2
             await page.mouse.move(cx, cy, steps=random.randint(8, 15))
-            await asyncio.sleep(random.uniform(0.3, 0.7))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
 
-            steps = random.randint(4, 8)
-            for i in range(steps):
+            move_count = random.randint(3, 7)
+            for _ in range(move_count):
                 elapsed = asyncio.get_event_loop().time() - start_t
-                if elapsed >= duration:
+                if elapsed >= duration * 0.8:
                     break
-                x = random.randint(50, w - 50)
-                y = random.randint(50, h - 50)
-                move_steps = random.randint(10, 25)
-                await page.mouse.move(x, y, steps=move_steps)
-                await asyncio.sleep(random.uniform(0.15, 0.5))
+                x = random.randint(100, w - 100)
+                y = random.randint(100, h - 100)
+                await page.mouse.move(x, y, steps=random.randint(10, 25))
+                await asyncio.sleep(random.uniform(0.1, 0.4))
 
-                if random.random() > 0.7:
-                    await page.mouse.click(x, y)
-                    await asyncio.sleep(random.uniform(0.1, 0.3))
-
-            if random.random() > 0.3:
-                scroll_y = random.randint(80, 300)
+            if random.random() > 0.4:
+                scroll_y = random.randint(50, 200)
                 await page.mouse.wheel(0, scroll_y)
-                await asyncio.sleep(random.uniform(0.3, 0.6))
+                await asyncio.sleep(random.uniform(0.2, 0.5))
                 if random.random() > 0.5:
-                    await page.mouse.wheel(0, -random.randint(30, 100))
-                    await asyncio.sleep(random.uniform(0.2, 0.4))
+                    await page.mouse.wheel(0, -random.randint(20, 80))
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
 
             remaining = duration - (asyncio.get_event_loop().time() - start_t)
             if remaining > 0:
@@ -2671,43 +2678,19 @@ class PlaywrightClient:
             await self._log_page_state(page, "form-timeout")
             return False
 
-    async def _navigate_chatgpt_signup(self, page) -> bool:
+    async def _handle_chatgpt_registration(self, page, email, password,
+                                             first, last, username, phone,
+                                             api_responses) -> RegistrationResult:
         """
-        تدفق التسجيل الخاص بـ ChatGPT — 3 مراحل مع محاكاة بشرية:
-        1. auth.openai.com/u/signup مع sentinel handling
-        2. chatgpt.com → Sign up → email modal على chatgpt.com
-        3. authorize URL كـ fallback
+        تدفق التسجيل الكامل لـ ChatGPT — يدير كل الخطوات داخلياً.
+        يُرجع RegistrationResult مباشرة بدون المرور بالحلقة العامة.
         """
         self._report("فتح صفحة تسجيل ChatGPT...")
 
-        # ===== المرحلة 1: auth.openai.com/u/signup مع انتظار sentinel =====
-        try:
-            log.info("ChatGPT: navigating to auth.openai.com/u/signup (headed+stealth)")
-            await page.goto(
-                "https://auth.openai.com/u/signup",
-                timeout=_NAV_TIMEOUT,
-                wait_until="domcontentloaded",
-            )
-            try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass
+        email_input = None
 
-            current = page.url
-            log.info("ChatGPT/auth: landed at %s", current[:120])
-            await self._log_page_state(page, "auth-direct")
-
-            if "platform.openai.com/login" not in current:
-                await self._wait_for_sentinel(page, timeout=20.0)
-                if await self._wait_for_openai_form(page, timeout_ms=15000):
-                    return True
-
-            log.info("ChatGPT: auth direct failed — trying homepage approach")
-        except Exception as exc:
-            log.warning("ChatGPT auth direct error: %s", exc)
-
-        # ===== المرحلة 2: chatgpt.com → Sign up =====
-        self._report("جاري فتح ChatGPT وضغط Sign up...")
+        # ===== المرحلة 1: chatgpt.com → Sign up =====
+        self._report("جاري فتح ChatGPT...")
         try:
             await page.goto(
                 "https://chatgpt.com",
@@ -2720,10 +2703,10 @@ class PlaywrightClient:
                 pass
 
             await self._wait_for_cf(page, max_wait=15)
-            await self._simulate_human(page, duration=2.0)
+            await self._simulate_human(page, duration=2.5)
         except Exception as exc:
             log.warning("ChatGPT homepage load error: %s", exc)
-            return False
+            return RegistrationResult(False, message="فشل تحميل صفحة ChatGPT")
 
         log.info("ChatGPT homepage loaded: %s", page.url[:80])
         await self._log_page_state(page, "homepage")
@@ -2733,7 +2716,7 @@ class PlaywrightClient:
             try:
                 btn = page.get_by_text(text, exact=False).first
                 if await btn.is_visible(timeout=1500):
-                    await self._simulate_human(page, duration=0.8)
+                    await self._simulate_human(page, duration=0.5)
                     await btn.click()
                     clicked = True
                     log.info("ChatGPT: clicked '%s'", text)
@@ -2756,64 +2739,285 @@ class PlaywrightClient:
                 except Exception:
                     continue
 
-        if clicked:
-            log.info("ChatGPT: after click, waiting for navigation/modal...")
-            # انتظر 10 ثانية — قد ينتقل لـ auth.openai.com أو يبقي على chatgpt.com
-            for wait_i in range(10):
-                await asyncio.sleep(1)
-                cur = page.url
-                if "auth.openai.com" in cur or "auth0" in cur:
-                    log.info("ChatGPT: redirected to auth: %s", cur[:100])
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=12000)
-                    except Exception:
-                        pass
-                    await self._wait_for_sentinel(page, timeout=15.0)
-                    break
-                # فحص إذا ظهر نموذج email على chatgpt.com (modal)
+        if not clicked:
+            return RegistrationResult(False, message="لم أجد زر التسجيل في ChatGPT")
+
+        log.info("ChatGPT: after click, waiting for navigation/modal...")
+        auth_redirect = False
+        for wait_i in range(15):
+            await asyncio.sleep(1)
+            cur = page.url
+            if "auth.openai.com" in cur or "auth0" in cur:
+                log.info("ChatGPT: redirected to auth: %s", cur[:100])
+                auth_redirect = True
                 try:
-                    inp = await page.query_selector(self._OPENAI_EMAIL_SEL)
-                    if inp and await inp.is_visible():
-                        log.info("ChatGPT: email form appeared on chatgpt.com (modal)")
-                        return True
+                    await page.wait_for_load_state("networkidle", timeout=12000)
                 except Exception:
                     pass
-            else:
-                log.info("ChatGPT: URL still %s after 10s", page.url[:80])
+                await self._simulate_human(page, duration=2.0)
+                await self._wait_for_sentinel(page, timeout=25.0)
+                break
 
-            await self._log_page_state(page, "after-click")
-
-            if await self._wait_for_openai_form(page, timeout_ms=15000):
-                return True
-
-        # ===== المرحلة 3: authorize URL مع screen_hint=signup =====
-        log.info("ChatGPT: trying authorize URL with screen_hint=signup")
-        try:
-            authorize_url = (
-                "https://auth.openai.com/authorize"
-                "?client_id=DRivsnm2Mu42T3KOpqdtwB3NYviHYzwD"
-                "&redirect_uri=https%3A%2F%2Fchatgpt.com%2Fapi%2Fauth%2Fcallback%2Flogin-web"
-                "&response_type=code"
-                "&scope=openid+email+profile+offline_access"
-                "&screen_hint=signup"
-            )
-            await page.goto(authorize_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
             try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
+                email_input = await page.query_selector(self._OPENAI_EMAIL_SEL)
+                if email_input and await email_input.is_visible():
+                    log.info("ChatGPT: email input appeared on chatgpt.com (modal)")
+                    break
             except Exception:
                 pass
 
-            await self._log_page_state(page, "authorize-url")
-            await self._wait_for_sentinel(page, timeout=20.0)
+            for frame in page.frames:
+                try:
+                    fi = await frame.query_selector(self._OPENAI_EMAIL_SEL)
+                    if fi and await fi.is_visible():
+                        log.info("ChatGPT: email input found in iframe: %s", frame.url[:80])
+                        email_input = fi
+                        break
+                except Exception:
+                    pass
+                if email_input:
+                    break
+        else:
+            log.info("ChatGPT: URL still %s after 15s", page.url[:80])
 
-            if "platform.openai.com/login" not in page.url:
-                if await self._wait_for_openai_form(page, timeout_ms=15000):
-                    return True
-        except Exception as exc:
-            log.warning("ChatGPT authorize URL error: %s", exc)
+        await self._log_page_state(page, "after-signup-click")
 
-        log.warning("ChatGPT: all approaches failed")
-        return False
+        if not email_input:
+            if auth_redirect:
+                email_input = await page.query_selector(self._OPENAI_EMAIL_SEL)
+                if not email_input:
+                    for frame in page.frames:
+                        try:
+                            fi = await frame.query_selector(self._OPENAI_EMAIL_SEL)
+                            if fi:
+                                email_input = fi
+                                break
+                        except Exception:
+                            pass
+
+            if not email_input:
+                try:
+                    await page.wait_for_selector(
+                        self._OPENAI_EMAIL_SEL, state="visible", timeout=10000
+                    )
+                    email_input = await page.query_selector(self._OPENAI_EMAIL_SEL)
+                except Exception:
+                    pass
+
+        if not email_input:
+            log.warning("ChatGPT: could not find email input after all attempts")
+            return RegistrationResult(
+                False,
+                message="فشل فتح نموذج التسجيل في ChatGPT — sentinel ممكن يحجب"
+            )
+
+        # ===== ملء الإيميل =====
+        self._report("إدخال البريد الإلكتروني...")
+        try:
+            await email_input.click()
+            await asyncio.sleep(random.uniform(0.3, 0.6))
+            await email_input.type(email, delay=random.randint(40, 90))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            log.info("ChatGPT: email typed: %s", email)
+        except Exception as e:
+            log.warning("ChatGPT: failed to type email: %s", e)
+            return RegistrationResult(False, message="فشل كتابة البريد الإلكتروني")
+
+        # ===== ضغط Continue =====
+        self._report("إرسال البريد...")
+        continue_clicked = False
+        for text in ["Continue", "continue", "Next", "التالي", "متابعة", "Submit"]:
+            try:
+                btn = page.get_by_text(text, exact=False).first
+                if await btn.is_visible(timeout=1000):
+                    await asyncio.sleep(random.uniform(0.3, 0.7))
+                    await btn.click()
+                    continue_clicked = True
+                    log.info("ChatGPT: clicked continue button '%s'", text)
+                    break
+            except Exception:
+                continue
+
+        if not continue_clicked:
+            for sel in [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                'button:has-text("Continue")',
+                'button:has-text("Sign up")',
+                '[data-testid*="continue"]',
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=500):
+                        await el.click()
+                        continue_clicked = True
+                        log.info("ChatGPT: clicked submit: %s", sel)
+                        break
+                except Exception:
+                    continue
+
+        if not continue_clicked:
+            try:
+                await page.keyboard.press("Enter")
+                continue_clicked = True
+                log.info("ChatGPT: pressed Enter as fallback submit")
+            except Exception:
+                pass
+
+        if not continue_clicked:
+            return RegistrationResult(False, message="لم أجد زر المتابعة بعد إدخال البريد")
+
+        # ===== انتظار الانتقال بعد إرسال البريد =====
+        await asyncio.sleep(3)
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+
+        new_url = page.url.lower()
+        log.info("ChatGPT: after email submit, URL: %s", page.url[:120])
+
+        if "/auth/error" in new_url or "/api/auth/error" in new_url:
+            log.warning("ChatGPT: auth error after email submit")
+            return RegistrationResult(
+                False,
+                message="فشل التحقق — ممكن البريد مستخدم أو الحماية حجبت الطلب"
+            )
+
+        # ===== فحص نتيجة إرسال البريد =====
+        await self._log_page_state(page, "after-email-submit")
+        body = ""
+        try:
+            body = (await page.inner_text("body")).lower()
+        except Exception:
+            pass
+
+        if any(kw in body for kw in _ERROR_KEYWORDS):
+            log.warning("ChatGPT: signup error detected: %s", body[:200])
+            return RegistrationResult(False, message="البريد مسجل مسبقاً")
+
+        if any(kw in body for kw in _OTP_KEYWORDS):
+            log.info("ChatGPT: OTP verification requested")
+            return RegistrationResult(
+                True, needs_otp=True,
+                message="تم إدخال البريد — بانتظار رمز التحقق",
+                page_url=page.url
+            )
+
+        # ===== حقل الباسوورد =====
+        pass_input = await page.query_selector('input[type="password"]')
+        if pass_input and await pass_input.is_visible():
+            log.info("ChatGPT: password field found, filling...")
+            self._report("إدخال كلمة المرور...")
+            try:
+                await pass_input.click()
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await pass_input.type(password, delay=random.randint(30, 80))
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+            except Exception as e:
+                log.warning("ChatGPT: failed to type password: %s", e)
+
+            for text in ["Continue", "Next", "Submit", "Sign up", "Create account"]:
+                try:
+                    btn = page.get_by_text(text, exact=False).first
+                    if await btn.is_visible(timeout=1000):
+                        await btn.click()
+                        log.info("ChatGPT: clicked '%s' after password", text)
+                        break
+                except Exception:
+                    continue
+            else:
+                try:
+                    submit = page.locator('button[type="submit"]').first
+                    if await submit.is_visible(timeout=500):
+                        await submit.click()
+                except Exception:
+                    await page.keyboard.press("Enter")
+
+            await asyncio.sleep(3)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception:
+                pass
+
+            body = ""
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                pass
+
+            if any(kw in body for kw in _OTP_KEYWORDS):
+                return RegistrationResult(
+                    True, needs_otp=True,
+                    message="تم إنشاء الحساب — بانتظار تأكيد البريد",
+                    page_url=page.url
+                )
+
+        # ===== ملء اسم + معلومات إضافية =====
+        for extra_step in range(3):
+            await asyncio.sleep(2)
+            body = ""
+            try:
+                body = (await page.inner_text("body")).lower()
+            except Exception:
+                pass
+
+            if any(kw in body for kw in _SUCCESS_KEYWORDS):
+                return RegistrationResult(
+                    True, message="تم إنشاء حساب ChatGPT بنجاح",
+                    page_url=page.url, account_confirmed=True
+                )
+
+            if any(kw in body for kw in _OTP_KEYWORDS):
+                return RegistrationResult(
+                    True, needs_otp=True,
+                    message="تم إنشاء الحساب — بانتظار تأكيد البريد",
+                    page_url=page.url
+                )
+
+            filled = await self._smart_fill(
+                page, email, password, first, last, username, phone
+            )
+            if filled > 0:
+                self._report(f"ملء بيانات إضافية (خطوة {extra_step + 1})...")
+                await asyncio.sleep(0.5)
+                await self._smart_submit(page)
+                await asyncio.sleep(2)
+            else:
+                break
+
+        body = ""
+        try:
+            body = (await page.inner_text("body")).lower()
+        except Exception:
+            pass
+
+        if any(kw in body for kw in _SUCCESS_KEYWORDS):
+            return RegistrationResult(
+                True, message="تم إنشاء حساب ChatGPT بنجاح",
+                page_url=page.url, account_confirmed=True
+            )
+
+        if any(kw in body for kw in _OTP_KEYWORDS):
+            return RegistrationResult(
+                True, needs_otp=True,
+                message="تم إنشاء الحساب — بانتظار تأكيد البريد",
+                page_url=page.url
+            )
+
+        for url_kw in _SIGNUP_SUCCESS_URLS:
+            if url_kw in page.url.lower():
+                return RegistrationResult(
+                    True, message="تم إنشاء حساب ChatGPT",
+                    page_url=page.url, account_confirmed=True
+                )
+
+        log.warning("ChatGPT: registration flow ended at %s — unclear result", page.url[:80])
+        await self._log_page_state(page, "chatgpt-final")
+        return RegistrationResult(
+            False,
+            message="انتهى تدفق التسجيل بدون نتيجة واضحة — جرب مرة ثانية"
+        )
 
     async def _log_page_state(self, page, tag: str = "") -> None:
         """تسجيل حالة الصفحة الحالية للتشخيص — يشمل HTML وframes."""
