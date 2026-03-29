@@ -2823,46 +2823,65 @@ class PlaywrightClient:
             log.warning("ChatGPT: failed to type email: %s", e)
             return RegistrationResult(False, message="فشل كتابة البريد الإلكتروني")
 
-        # ===== ضغط Continue =====
+        # ===== ضغط زر إرسال الإيميل (مع استبعاد أزرار OAuth) =====
         self._report("إرسال البريد...")
+        _OAUTH_SKIP_WORDS = ["google", "microsoft", "apple", "facebook",
+                             "github", "twitter", "linkedin", "phone", "sms"]
         continue_clicked = False
-        for text in ["Continue", "continue", "Next", "التالي", "متابعة", "Submit"]:
+
+        for sel in ['button[type="submit"]', 'input[type="submit"]']:
             try:
-                btn = page.get_by_text(text, exact=False).first
-                if await btn.is_visible(timeout=1000):
-                    await asyncio.sleep(random.uniform(0.3, 0.7))
-                    await btn.click()
-                    continue_clicked = True
-                    log.info("ChatGPT: clicked continue button '%s'", text)
-                    break
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=1000):
+                    btn_text = (await el.inner_text()).strip().lower() if sel.startswith("button") else ""
+                    if not any(skip in btn_text for skip in _OAUTH_SKIP_WORDS):
+                        await asyncio.sleep(random.uniform(0.3, 0.7))
+                        await el.click()
+                        continue_clicked = True
+                        log.info("ChatGPT: clicked submit button [%s]: '%s'", sel, btn_text[:30])
+                        break
             except Exception:
                 continue
 
         if not continue_clicked:
-            for sel in [
-                'button[type="submit"]',
-                'input[type="submit"]',
-                'button:has-text("Continue")',
-                'button:has-text("Sign up")',
-                '[data-testid*="continue"]',
-            ]:
+            for text in ["Continue", "Next", "التالي", "متابعة", "Sign up", "Submit"]:
                 try:
-                    el = page.locator(sel).first
-                    if await el.is_visible(timeout=500):
-                        await el.click()
+                    candidates = page.get_by_text(text, exact=False)
+                    count = await candidates.count()
+                    for i in range(min(count, 5)):
+                        btn = candidates.nth(i)
+                        if not await btn.is_visible(timeout=500):
+                            continue
+                        btn_full_text = ""
+                        try:
+                            btn_full_text = (await btn.inner_text()).strip().lower()
+                        except Exception:
+                            pass
+                        if any(skip in btn_full_text for skip in _OAUTH_SKIP_WORDS):
+                            log.debug("ChatGPT: skipping OAuth button '%s'", btn_full_text[:40])
+                            continue
+                        await asyncio.sleep(random.uniform(0.3, 0.7))
+                        await btn.click()
                         continue_clicked = True
-                        log.info("ChatGPT: clicked submit: %s", sel)
+                        log.info("ChatGPT: clicked button '%s'", btn_full_text[:40])
+                        break
+                    if continue_clicked:
                         break
                 except Exception:
                     continue
 
         if not continue_clicked:
             try:
-                await page.keyboard.press("Enter")
+                await email_input.press("Enter")
                 continue_clicked = True
-                log.info("ChatGPT: pressed Enter as fallback submit")
+                log.info("ChatGPT: pressed Enter on email input as fallback")
             except Exception:
-                pass
+                try:
+                    await page.keyboard.press("Enter")
+                    continue_clicked = True
+                    log.info("ChatGPT: pressed Enter as fallback")
+                except Exception:
+                    pass
 
         if not continue_clicked:
             return RegistrationResult(False, message="لم أجد زر المتابعة بعد إدخال البريد")
@@ -2882,6 +2901,13 @@ class PlaywrightClient:
             return RegistrationResult(
                 False,
                 message="فشل التحقق — ممكن البريد مستخدم أو الحماية حجبت الطلب"
+            )
+
+        if "accounts.google.com" in new_url or "login.microsoftonline.com" in new_url:
+            log.warning("ChatGPT: redirected to OAuth provider (%s) — wrong button was clicked", new_url[:60])
+            return RegistrationResult(
+                False,
+                message="تم التحويل لتسجيل Google/Microsoft بدل OpenAI — جاري إعادة المحاولة"
             )
 
         # ===== فحص نتيجة إرسال البريد =====
