@@ -524,6 +524,29 @@ class PlaywrightClient:
                 )
 
             if filled_count == 0:
+                # قد يكون الحقول مملوءة مسبقاً (مثل auth.openai.com بعد إدخال الإيميل)
+                # تحقق إذا كانت هناك أزرار Continue/Next مرئية — إذا نعم، اضغطها
+                visible_inputs = await self._count_visible_inputs(page)
+                if visible_inputs == 0:
+                    # لا يوجد أي حقول — انتهى التسجيل
+                    break
+                # يوجد حقول مملوءة مسبقاً — حاول الضغط على Continue
+                log.info("-> Step %d: 0 new fields filled but %d inputs visible "
+                         "(pre-filled) — trying to submit", step, visible_inputs)
+                before_url_prefill = page.url
+                submitted_prefill = await self._smart_submit(page)
+                if submitted_prefill:
+                    await asyncio.sleep(2)
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except Exception:
+                        pass
+                    if page.url.rstrip("/") != before_url_prefill.rstrip("/"):
+                        # URL تغيّر — تابع الحلقة من جديد
+                        await self._wait_for_spa(page)
+                        log.info("-> Prefill-submit: URL changed to %s", page.url[:80])
+                        continue
+                # لا تغيّر في URL أو لم نجد زر → توقف
                 break
 
             await asyncio.sleep(0.3)
@@ -546,6 +569,21 @@ class PlaywrightClient:
                 pass
 
             if page.url.rstrip("/") != before_url.rstrip("/"):
+                new_url = page.url.lower()
+                # انتظار تحميل كامل عند الانتقال لصفحات auth
+                _AUTH_HOSTS = ["auth.openai.com", "auth0.com", "accounts.google.com",
+                               "login.microsoftonline.com"]
+                if any(h in new_url for h in _AUTH_HOSTS):
+                    log.info("-> Auth redirect detected: %s — waiting for load...", page.url[:80])
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        except Exception:
+                            pass
+                    await asyncio.sleep(2)
+
                 cf_ok = await self._wait_for_cf(page, max_wait=20)
                 if not cf_ok:
                     try:
@@ -603,7 +641,12 @@ class PlaywrightClient:
                     continue
                 return step_result
 
-            new_inputs = await self._wait_for_inputs(page, max_wait=5)
+            # انتظار أطول لصفحات auth التي تحتاج وقتاً لتحميل النموذج التالي
+            _AUTH_NEXT = ["auth.openai.com", "auth0.com", "accounts.google.com",
+                          "/auth/", "/signin", "/login", "/sso"]
+            _auth_redirect = any(d in page.url.lower() for d in _AUTH_NEXT)
+            _input_wait = 18.0 if _auth_redirect else 8.0
+            new_inputs = await self._wait_for_inputs(page, max_wait=_input_wait)
 
             if has_register_api and new_inputs == 0:
                 return RegistrationResult(
@@ -2369,8 +2412,15 @@ class PlaywrightClient:
         if current_url.rstrip("/") != before_url.rstrip("/"):
             path = current_url.lower()
 
+            # انتظار إضافي لصفحات auth التي تستغرق وقتاً أطول في التحميل
+            _AUTH_DOMAINS = ["auth.openai.com", "auth0.com", "accounts.google.com",
+                             "login.microsoftonline.com", "auth.", "/auth/", "/login", "/signin"]
+            _is_auth_redirect = any(d in current_url.lower() for d in _AUTH_DOMAINS)
+            max_attempts = 9 if _is_auth_redirect else 5  # 16s vs 8s
+            sleep_per_attempt = 2
+
             still_has_inputs = False
-            for attempt in range(3):
+            for attempt in range(max_attempts):
                 try:
                     inputs = await page.query_selector_all("input")
                     for inp in inputs:
@@ -2386,10 +2436,10 @@ class PlaywrightClient:
                     pass
                 if still_has_inputs:
                     break
-                if attempt < 2:
-                    await asyncio.sleep(2)
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(sleep_per_attempt)
                     try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                        await page.wait_for_load_state("domcontentloaded", timeout=4000)
                     except Exception:
                         pass
 
