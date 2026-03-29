@@ -255,24 +255,7 @@ class PlaywrightClient:
 
         browser = None
         pw_instance = None
-        xvfb_proc = None
         try:
-            import subprocess as _sp
-            xvfb_display = f":{random.randint(10, 99)}"
-            try:
-                xvfb_proc = _sp.Popen(
-                    ["Xvfb", xvfb_display, "-screen", "0", "1920x1080x24",
-                     "-nolisten", "tcp", "-ac"],
-                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                )
-                await asyncio.sleep(0.5)
-                os.environ["DISPLAY"] = xvfb_display
-                _use_headed = True
-                log.info("Xvfb started on display %s — using headed mode", xvfb_display)
-            except Exception as xvfb_err:
-                _use_headed = False
-                log.warning("Xvfb unavailable (%s) — falling back to headless", xvfb_err)
-
             pw_instance = await async_playwright().start()
             chromium_path = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium")
             chrome_args = [
@@ -281,7 +264,6 @@ class PlaywrightClient:
                 "--disable-blink-features=AutomationControlled",
                 "--disable-infobars",
                 "--window-size=1920,1080",
-                "--start-maximized",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
@@ -289,18 +271,18 @@ class PlaywrightClient:
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-component-update",
+                "--disable-gpu",
             ]
-            if not _use_headed:
-                chrome_args.append("--disable-gpu")
 
             launch_args = {
-                "headless": not _use_headed,
+                "headless": True,
                 "args": chrome_args,
             }
             if chromium_path:
                 launch_args["executable_path"] = chromium_path
 
             browser = await pw_instance.chromium.launch(**launch_args)
+            log.info("Browser launched (headless=new mode, Playwright %s)", "1.58+")
             fp = fingerprint_engine.generate(proxy_country="US")
             cv = fp.chrome_version
             context = await browser.new_context(
@@ -310,7 +292,8 @@ class PlaywrightClient:
                 timezone_id=fp.timezone_id,
                 color_scheme="light",
                 java_script_enabled=True,
-                bypass_csp=True,
+                bypass_csp=False,
+                ignore_https_errors=True,
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9",
                     "sec-ch-ua": f'"Google Chrome";v="{cv}", "Chromium";v="{cv}"',
@@ -465,15 +448,6 @@ class PlaywrightClient:
                     await asyncio.wait_for(pw_instance.stop(), timeout=5)
             except Exception:
                 log.warning("Playwright stop timed out")
-            if xvfb_proc:
-                try:
-                    xvfb_proc.terminate()
-                    xvfb_proc.wait(timeout=3)
-                except Exception:
-                    try:
-                        xvfb_proc.kill()
-                    except Exception:
-                        pass
 
     def _report(self, msg: str):
         log.info("-> %s", msg)
@@ -573,6 +547,8 @@ class PlaywrightClient:
                 await asyncio.sleep(1)
                 await self._wait_for_spa(page)
 
+            await self._simulate_human(page, duration=1.5)
+
             filled_count = await self._smart_fill(
                 page, email, password, first, last, username, phone
             )
@@ -610,6 +586,8 @@ class PlaywrightClient:
                 break
 
             await asyncio.sleep(0.3)
+
+            await self._simulate_human(page, duration=1.0)
 
             step_label = f"الخطوة {step}" if step > 1 else "إرسال النموذج"
             self._report(f"{step_label}...")
@@ -2603,22 +2581,42 @@ class PlaywrightClient:
     )
 
     async def _simulate_human(self, page, duration: float = 2.0) -> None:
-        """محاكاة سلوك بشري — حركة ماوس + تمرير عشوائي."""
+        """محاكاة سلوك بشري — حركة ماوس + تمرير + نقرات عشوائية."""
         try:
             vw = page.viewport_size or {"width": 1920, "height": 1080}
             w, h = vw["width"], vw["height"]
-            steps = random.randint(3, 6)
-            for _ in range(steps):
-                x = random.randint(100, w - 100)
-                y = random.randint(100, h - 100)
-                await page.mouse.move(x, y, steps=random.randint(5, 15))
-                await asyncio.sleep(random.uniform(0.1, 0.4))
+            start_t = asyncio.get_event_loop().time()
 
-            if random.random() > 0.5:
-                await page.mouse.wheel(0, random.randint(50, 200))
-                await asyncio.sleep(random.uniform(0.2, 0.5))
+            cx, cy = w // 2, h // 2
+            await page.mouse.move(cx, cy, steps=random.randint(8, 15))
+            await asyncio.sleep(random.uniform(0.3, 0.7))
 
-            await asyncio.sleep(max(0, duration - 1.5))
+            steps = random.randint(4, 8)
+            for i in range(steps):
+                elapsed = asyncio.get_event_loop().time() - start_t
+                if elapsed >= duration:
+                    break
+                x = random.randint(50, w - 50)
+                y = random.randint(50, h - 50)
+                move_steps = random.randint(10, 25)
+                await page.mouse.move(x, y, steps=move_steps)
+                await asyncio.sleep(random.uniform(0.15, 0.5))
+
+                if random.random() > 0.7:
+                    await page.mouse.click(x, y)
+                    await asyncio.sleep(random.uniform(0.1, 0.3))
+
+            if random.random() > 0.3:
+                scroll_y = random.randint(80, 300)
+                await page.mouse.wheel(0, scroll_y)
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+                if random.random() > 0.5:
+                    await page.mouse.wheel(0, -random.randint(30, 100))
+                    await asyncio.sleep(random.uniform(0.2, 0.4))
+
+            remaining = duration - (asyncio.get_event_loop().time() - start_t)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
         except Exception:
             await asyncio.sleep(duration)
 

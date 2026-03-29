@@ -98,11 +98,9 @@ class FingerprintProfile:
         return _extract_chrome_version(self.user_agent)
 
     def build_init_script(self) -> str:
-        """Builds a complete JS stealth+fingerprint script for Playwright add_init_script."""
+        """Builds fingerprint-only JS script (non-overlapping with playwright-stealth)."""
         return f"""
 (() => {{
-    // ========== Function.prototype.toString protection ==========
-    // Must come FIRST — wraps all future overrides so toString() returns native code
     const _nativeToString = Function.prototype.toString;
     const _patchedFns = new Map();
     const _origCall = Function.prototype.call;
@@ -111,74 +109,37 @@ class FingerprintProfile:
         return _origCall.call(_nativeToString, this);
     }};
     _patchedFns.set(Function.prototype.toString, 'function toString() {{ [native code] }}');
-
     function _patchToString(fn, nativeStr) {{
         _patchedFns.set(fn, nativeStr || 'function ' + (fn.name || '') + '() {{ [native code] }}');
     }}
 
-    // --- webdriver detection evasion ---
-    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
-    try {{ delete navigator.__proto__.webdriver; }} catch(_) {{}}
-
-    // --- Automation-controlled indicators ---
-    // Remove cdc_ properties (ChromeDriver signatures)
-    for (const key of Object.keys(window)) {{
-        if (key.match(/^cdc_|^\\$cdc_/)) {{
-            try {{ delete window[key]; }} catch(_) {{}}
-        }}
-    }}
-
-    // --- chrome object (full spoof) ---
-    const _chrome = {{
-        app: {{
-            isInstalled: false,
-            InstallState: {{ DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }},
-            RunningState: {{ CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }},
-            getDetails: function() {{ return null; }},
-            getIsInstalled: function() {{ return false; }},
-            runningState: function() {{ return 'cannot_run'; }},
-        }},
-        runtime: {{
-            OnInstalledReason: {{ CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' }},
-            OnRestartRequiredReason: {{ APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' }},
-            PlatformArch: {{ ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' }},
-            PlatformNaclArch: {{ ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' }},
-            PlatformOs: {{ ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' }},
-            RequestUpdateCheckStatus: {{ NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' }},
-            connect: function() {{ return {{ onDisconnect: {{ addListener: function() {{}} }}, onMessage: {{ addListener: function() {{}} }}, postMessage: function() {{}} }} }},
-            sendMessage: function(extensionId, message, options, callback) {{ if (typeof callback === 'function') callback(); }},
-            id: undefined,
-        }},
-        loadTimes: function() {{ return {{ commitLoadTime: performance.timing.responseStart / 1000, connectionInfo: 'h2', finishDocumentLoadTime: performance.timing.domContentLoadedEventEnd / 1000, finishLoadTime: performance.timing.loadEventEnd / 1000, firstPaintAfterLoadTime: 0, firstPaintTime: performance.timing.responseStart / 1000 + 0.1, navigationType: 'Other', npnNegotiatedProtocol: 'h2', requestTime: performance.timing.navigationStart / 1000, startLoadTime: performance.timing.navigationStart / 1000, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true }}; }},
-        csi: function() {{ return {{ pageT: Date.now() - performance.timing.navigationStart, startE: performance.timing.navigationStart, onloadT: performance.timing.loadEventEnd - performance.timing.navigationStart }}; }},
-    }};
-    try {{
-        Object.defineProperty(window, 'chrome', {{ get: () => _chrome, configurable: true }});
-        Object.defineProperty(window.navigator, 'chrome', {{ get: () => _chrome, configurable: true }});
-    }} catch(_) {{
-        window.chrome = _chrome;
-    }}
-    _patchToString(_chrome.loadTimes, 'function loadTimes() {{ [native code] }}');
-    _patchToString(_chrome.csi, 'function csi() {{ [native code] }}');
-
-    // --- hardware fingerprint ---
     Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {self.hardware_concurrency} }});
     Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {self.device_memory} }});
-    Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => 0 }});
-    Object.defineProperty(navigator, 'platform', {{ get: () => 'Win32' }});
-    Object.defineProperty(navigator, 'languages', {{ get: () => Object.freeze(['en-US', 'en']) }});
-    Object.defineProperty(navigator, 'language', {{ get: () => 'en-US' }});
     Object.defineProperty(screen, 'colorDepth', {{ get: () => {self.color_depth} }});
     Object.defineProperty(screen, 'pixelDepth', {{ get: () => {self.color_depth} }});
 
-    // --- navigator.connection ---
+    Object.defineProperty(window, 'outerWidth', {{ get: () => window.innerWidth }});
+    Object.defineProperty(window, 'outerHeight', {{ get: () => window.innerHeight + 85 }});
+    Object.defineProperty(screen, 'width', {{ get: () => {self.viewport['width']} }});
+    Object.defineProperty(screen, 'height', {{ get: () => {self.viewport['height']} }});
+    Object.defineProperty(screen, 'availWidth', {{ get: () => {self.viewport['width']} }});
+    Object.defineProperty(screen, 'availHeight', {{ get: () => {self.viewport['height']} - 40 }});
+
+    Object.defineProperty(document, 'hidden', {{ get: () => false }});
+    Object.defineProperty(document, 'visibilityState', {{ get: () => 'visible' }});
+
+    try {{
+        const origDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hasFocus');
+        if (origDesc) {{
+            Document.prototype.hasFocus = function() {{ return true; }};
+            _patchToString(Document.prototype.hasFocus, 'function hasFocus() {{ [native code] }}');
+        }}
+    }} catch(_) {{}}
+
     if (!navigator.connection) {{
         Object.defineProperty(navigator, 'connection', {{
             get: () => ({{
-                effectiveType: '4g',
-                rtt: 50,
-                downlink: 10,
-                saveData: false,
+                effectiveType: '4g', rtt: 50, downlink: 10, saveData: false,
                 onchange: null,
                 addEventListener: function() {{}},
                 removeEventListener: function() {{}},
@@ -187,28 +148,6 @@ class FingerprintProfile:
         }});
     }}
 
-    // --- document visibility ---
-    Object.defineProperty(document, 'hidden', {{ get: () => false }});
-    Object.defineProperty(document, 'visibilityState', {{ get: () => 'visible' }});
-
-    // --- iframe contentWindow --- 
-    // Prevent detection via cross-origin iframe probe
-    try {{
-        const _origContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
-        if (_origContentWindow) {{
-            Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {{
-                get: function() {{
-                    const w = _origContentWindow.get.call(this);
-                    if (w) {{
-                        try {{ w.chrome = _chrome; }} catch(_) {{}}
-                    }}
-                    return w;
-                }}
-            }});
-        }}
-    }} catch(_) {{}}
-
-    // --- Canvas fingerprint noise ---
     const _canvasNoise = {self.canvas_noise:.6f};
     const _origToDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = function(type, quality) {{
@@ -240,7 +179,6 @@ class FingerprintProfile:
     }};
     _patchToString(CanvasRenderingContext2D.prototype.getImageData, 'function getImageData() {{ [native code] }}');
 
-    // --- WebGL vendor/renderer spoof ---
     const _getParam = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function(param) {{
         if (param === 37445) return '{self.webgl_vendor}';
@@ -258,7 +196,6 @@ class FingerprintProfile:
         _patchToString(WebGL2RenderingContext.prototype.getParameter, 'function getParameter() {{ [native code] }}');
     }}
 
-    // --- AudioContext noise ---
     const _audioNoise = {self.audio_noise:.8f};
     if (typeof AudioBuffer !== 'undefined') {{
         const _origGetChannelData = AudioBuffer.prototype.getChannelData;
@@ -270,85 +207,6 @@ class FingerprintProfile:
             return data;
         }};
         _patchToString(AudioBuffer.prototype.getChannelData, 'function getChannelData() {{ [native code] }}');
-    }}
-
-    // --- Permissions API spoof ---
-    if (navigator.permissions && navigator.permissions.query) {{
-        const _origQuery = navigator.permissions.query.bind(navigator.permissions);
-        navigator.permissions.query = (parameters) => {{
-            if (parameters.name === 'notifications') {{
-                return Promise.resolve({{ state: 'prompt', onchange: null }});
-            }}
-            return _origQuery(parameters);
-        }};
-        _patchToString(navigator.permissions.query, 'function query() {{ [native code] }}');
-    }}
-
-    // --- Notification permission ---
-    if (typeof Notification !== 'undefined') {{
-        Object.defineProperty(Notification, 'permission', {{ get: () => 'default' }});
-    }}
-
-    // --- Plugin list spoof (non-empty) ---
-    Object.defineProperty(navigator, 'plugins', {{
-        get: () => {{
-            const plugins = [
-                {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 1, item: function(i) {{ return this; }}, namedItem: function(n) {{ return this; }} }},
-                {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '', length: 1, item: function(i) {{ return this; }}, namedItem: function(n) {{ return this; }} }},
-                {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '', length: 1, item: function(i) {{ return this; }}, namedItem: function(n) {{ return this; }} }},
-            ];
-            plugins.item = function(i) {{ return this[i] || null; }};
-            plugins.namedItem = function(n) {{ return this.find(p => p.name === n) || null; }};
-            plugins.refresh = function() {{}};
-            Object.setPrototypeOf(plugins, PluginArray.prototype);
-            return plugins;
-        }}
-    }});
-
-    // --- MimeTypes spoof ---
-    Object.defineProperty(navigator, 'mimeTypes', {{
-        get: () => {{
-            const mimes = [
-                {{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: navigator.plugins[0] }},
-            ];
-            mimes.item = function(i) {{ return this[i] || null; }};
-            mimes.namedItem = function(n) {{ return this.find(m => m.type === n) || null; }};
-            Object.setPrototypeOf(mimes, MimeTypeArray.prototype);
-            return mimes;
-        }}
-    }});
-
-    // --- window.outerWidth/Height match viewport ---
-    Object.defineProperty(window, 'outerWidth', {{ get: () => window.innerWidth }});
-    Object.defineProperty(window, 'outerHeight', {{ get: () => window.innerHeight + 85 }});
-
-    // --- Screen dimensions match viewport ---
-    Object.defineProperty(screen, 'width', {{ get: () => {self.viewport['width']} }});
-    Object.defineProperty(screen, 'height', {{ get: () => {self.viewport['height']} }});
-    Object.defineProperty(screen, 'availWidth', {{ get: () => {self.viewport['width']} }});
-    Object.defineProperty(screen, 'availHeight', {{ get: () => {self.viewport['height']} - 40 }});
-
-    // --- Prevent Permissions prototype leak ---
-    try {{
-        const origDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hasFocus');
-        if (origDesc) {{
-            const origFn = origDesc.value;
-            Document.prototype.hasFocus = function() {{ return true; }};
-            _patchToString(Document.prototype.hasFocus, 'function hasFocus() {{ [native code] }}');
-        }}
-    }} catch(_) {{}}
-
-    // --- WebDriver properties cleanup ---
-    const props = ['__webdriver_evaluate', '__selenium_evaluate',
-                   '__webdriver_script_function', '__webdriver_script_func',
-                   '__webdriver_script_fn', '__fxdriver_evaluate',
-                   '__driver_evaluate', '__webdriver_unwrapped',
-                   '__driver_unwrapped', '__selenium_unwrapped',
-                   '_Selenium_IDE_Recorder', '_selenium', 'calledSelenium',
-                   '__nightmare', 'domAutomation', 'domAutomationController'];
-    for (const prop of props) {{
-        try {{ delete window[prop]; }} catch(_) {{}}
-        try {{ delete document[prop]; }} catch(_) {{}}
     }}
 }})();
 """
