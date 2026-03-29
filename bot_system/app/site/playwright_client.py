@@ -255,23 +255,47 @@ class PlaywrightClient:
 
         browser = None
         pw_instance = None
+        xvfb_proc = None
         try:
+            import subprocess as _sp
+            xvfb_display = f":{random.randint(10, 99)}"
+            try:
+                xvfb_proc = _sp.Popen(
+                    ["Xvfb", xvfb_display, "-screen", "0", "1920x1080x24",
+                     "-nolisten", "tcp", "-ac"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
+                await asyncio.sleep(0.5)
+                os.environ["DISPLAY"] = xvfb_display
+                _use_headed = True
+                log.info("Xvfb started on display %s — using headed mode", xvfb_display)
+            except Exception as xvfb_err:
+                _use_headed = False
+                log.warning("Xvfb unavailable (%s) — falling back to headless", xvfb_err)
+
             pw_instance = await async_playwright().start()
             chromium_path = os.environ.get("CHROMIUM_PATH") or shutil.which("chromium")
+            chrome_args = [
+                "--no-sandbox", "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+                "--start-maximized",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--lang=en-US",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-component-update",
+            ]
+            if not _use_headed:
+                chrome_args.append("--disable-gpu")
+
             launch_args = {
-                "headless": True,
-                "args": [
-                    "--no-sandbox", "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage", "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-extensions",
-                    "--disable-infobars",
-                    "--window-size=1920,1080",
-                    "--start-maximized",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                ],
+                "headless": not _use_headed,
+                "args": chrome_args,
             }
             if chromium_path:
                 launch_args["executable_path"] = chromium_path
@@ -296,7 +320,16 @@ class PlaywrightClient:
             )
 
             await context.add_init_script(fp.build_init_script())
+
+            try:
+                from playwright_stealth import stealth_async
+            except ImportError:
+                stealth_async = None
+
             page = await context.new_page()
+            if stealth_async:
+                await stealth_async(page)
+                log.info("playwright-stealth applied")
 
             api_responses = []
 
@@ -432,6 +465,15 @@ class PlaywrightClient:
                     await asyncio.wait_for(pw_instance.stop(), timeout=5)
             except Exception:
                 log.warning("Playwright stop timed out")
+            if xvfb_proc:
+                try:
+                    xvfb_proc.terminate()
+                    xvfb_proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        xvfb_proc.kill()
+                    except Exception:
+                        pass
 
     def _report(self, msg: str):
         log.info("-> %s", msg)
@@ -589,6 +631,15 @@ class PlaywrightClient:
             if page.url.rstrip("/") != before_url.rstrip("/"):
                 new_url = page.url.lower()
                 log.info("-> URL changed: %s → %s", before_url[:60], page.url[:80])
+
+                if "/auth/error" in new_url or "/api/auth/error" in new_url:
+                    log.warning("-> Auth error page detected: %s — sentinel may have blocked", page.url[:80])
+                    return RegistrationResult(
+                        False,
+                        message="فشل التحقق من الحماية — جرب بروكسي مختلف أو حاول لاحقاً",
+                        page_url=page.url,
+                    )
+
                 _AUTH_HOSTS = ["auth.openai.com", "auth0.com", "accounts.google.com",
                                "login.microsoftonline.com"]
                 if any(h in new_url for h in _AUTH_HOSTS):
@@ -601,6 +652,7 @@ class PlaywrightClient:
                         except Exception:
                             pass
                     await asyncio.sleep(2)
+                    await self._simulate_human(page, duration=2.0)
                     await self._log_page_state(page, "post-auth-redirect")
 
                 cf_ok = await self._wait_for_cf(page, max_wait=20)
@@ -2342,11 +2394,15 @@ class PlaywrightClient:
     async def _fill_field(self, inp, value: str):
         try:
             await inp.click()
-            await asyncio.sleep(random.uniform(0.05, 0.15))
+            await asyncio.sleep(random.uniform(0.1, 0.3))
         except Exception:
             pass
-        await inp.fill(value)
-        await asyncio.sleep(random.uniform(0.03, 0.1))
+        try:
+            await inp.fill("")
+        except Exception:
+            pass
+        await inp.type(value, delay=random.randint(30, 90))
+        await asyncio.sleep(random.uniform(0.05, 0.2))
 
     async def _smart_submit(self, page) -> bool:
         _OAUTH_SKIP = [
@@ -2546,6 +2602,58 @@ class PlaywrightClient:
         'input[placeholder*="email" i], input[autocomplete="email"]'
     )
 
+    async def _simulate_human(self, page, duration: float = 2.0) -> None:
+        """محاكاة سلوك بشري — حركة ماوس + تمرير عشوائي."""
+        try:
+            vw = page.viewport_size or {"width": 1920, "height": 1080}
+            w, h = vw["width"], vw["height"]
+            steps = random.randint(3, 6)
+            for _ in range(steps):
+                x = random.randint(100, w - 100)
+                y = random.randint(100, h - 100)
+                await page.mouse.move(x, y, steps=random.randint(5, 15))
+                await asyncio.sleep(random.uniform(0.1, 0.4))
+
+            if random.random() > 0.5:
+                await page.mouse.wheel(0, random.randint(50, 200))
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            await asyncio.sleep(max(0, duration - 1.5))
+        except Exception:
+            await asyncio.sleep(duration)
+
+    async def _wait_for_sentinel(self, page, timeout: float = 15.0) -> None:
+        """انتظار sentinel الخاص بـ OpenAI للانتهاء + محاكاة سلوك بشري."""
+        log.info("Waiting for sentinel to complete (up to %.0fs)...", timeout)
+        await self._simulate_human(page, duration=min(3.0, timeout / 3))
+
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < timeout:
+            sentinel_done = True
+            for frame in page.frames:
+                f_url = (frame.url or "").lower()
+                if "sentinel" in f_url:
+                    try:
+                        content = await frame.content()
+                        if len(content) < 100:
+                            sentinel_done = False
+                    except Exception:
+                        pass
+
+            if sentinel_done:
+                body = ""
+                try:
+                    body = await page.inner_text("body")
+                except Exception:
+                    pass
+                if body.strip():
+                    log.info("Sentinel resolved — page has content")
+                    return
+
+            await self._simulate_human(page, duration=1.5)
+
+        log.info("Sentinel wait exhausted")
+
     async def _wait_for_openai_form(self, page, timeout_ms: int = 25000) -> bool:
         """
         ينتظر حتى يظهر نموذج الإيميل في auth.openai.com
@@ -2567,24 +2675,23 @@ class PlaywrightClient:
 
     async def _navigate_chatgpt_signup(self, page) -> bool:
         """
-        تدفق التسجيل الخاص بـ ChatGPT:
-        1. الذهاب مباشرةً لـ auth.openai.com/u/signup (React — يحتاج networkidle)
-        2. chatgpt.com → ضغط Sign up → انتظار auth.openai.com
+        تدفق التسجيل الخاص بـ ChatGPT — 3 مراحل مع محاكاة بشرية:
+        1. auth.openai.com/u/signup مع sentinel handling
+        2. chatgpt.com → Sign up → email modal على chatgpt.com
+        3. authorize URL كـ fallback
         """
         self._report("فتح صفحة تسجيل ChatGPT...")
 
-        # ===== المرحلة 1: مباشرةً لـ auth.openai.com/u/signup =====
+        # ===== المرحلة 1: auth.openai.com/u/signup مع انتظار sentinel =====
         try:
-            log.info("ChatGPT: navigating to auth.openai.com/u/signup (networkidle)")
+            log.info("ChatGPT: navigating to auth.openai.com/u/signup (headed+stealth)")
             await page.goto(
                 "https://auth.openai.com/u/signup",
                 timeout=_NAV_TIMEOUT,
                 wait_until="domcontentloaded",
             )
-
-            # auth.openai.com هو React app — ننتظر networkidle ليرسم
             try:
-                await page.wait_for_load_state("networkidle", timeout=12000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
 
@@ -2593,15 +2700,15 @@ class PlaywrightClient:
             await self._log_page_state(page, "auth-direct")
 
             if "platform.openai.com/login" not in current:
-                # انتظر ظهور نموذج الإيميل حتى 25 ثانية
-                if await self._wait_for_openai_form(page, timeout_ms=25000):
+                await self._wait_for_sentinel(page, timeout=20.0)
+                if await self._wait_for_openai_form(page, timeout_ms=15000):
                     return True
 
             log.info("ChatGPT: auth direct failed — trying homepage approach")
         except Exception as exc:
             log.warning("ChatGPT auth direct error: %s", exc)
 
-        # ===== المرحلة 2: chatgpt.com → ضغط Sign up → انتقال لـ auth =====
+        # ===== المرحلة 2: chatgpt.com → Sign up =====
         self._report("جاري فتح ChatGPT وضغط Sign up...")
         try:
             await page.goto(
@@ -2609,13 +2716,13 @@ class PlaywrightClient:
                 timeout=_NAV_TIMEOUT,
                 wait_until="domcontentloaded",
             )
-            # انتظر تحميل SPA
             try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
+                await page.wait_for_load_state("networkidle", timeout=12000)
             except Exception:
                 pass
-            await asyncio.sleep(1)
+
             await self._wait_for_cf(page, max_wait=15)
+            await self._simulate_human(page, duration=2.0)
         except Exception as exc:
             log.warning("ChatGPT homepage load error: %s", exc)
             return False
@@ -2623,12 +2730,12 @@ class PlaywrightClient:
         log.info("ChatGPT homepage loaded: %s", page.url[:80])
         await self._log_page_state(page, "homepage")
 
-        # ضغط أي زر لفتح تسجيل
         clicked = False
-        for text in ["Sign up", "Sign up for free", "Get started", "Create account", "Try it first"]:
+        for text in ["Sign up for free", "Sign up", "Get started", "Create account"]:
             try:
                 btn = page.get_by_text(text, exact=False).first
-                if await btn.is_visible(timeout=1000):
+                if await btn.is_visible(timeout=1500):
+                    await self._simulate_human(page, duration=0.8)
                     await btn.click()
                     clicked = True
                     log.info("ChatGPT: clicked '%s'", text)
@@ -2638,8 +2745,8 @@ class PlaywrightClient:
 
         if not clicked:
             for sel in [
-                'a[href*="signup"]', 'button:has-text("Sign")',
-                '[data-testid*="signup"]', '[href*="sign-up"]',
+                'a[href*="signup"]', 'a[href*="sign-up"]',
+                'button:has-text("Sign")', '[data-testid*="signup"]',
             ]:
                 try:
                     el = page.locator(sel).first
@@ -2652,30 +2759,36 @@ class PlaywrightClient:
                     continue
 
         if clicked:
-            log.info("ChatGPT: after click, waiting for auth redirect...")
-            # انتظر حتى 15 ثانية للانتقال لـ auth.openai.com
-            for _ in range(15):
+            log.info("ChatGPT: after click, waiting for navigation/modal...")
+            # انتظر 10 ثانية — قد ينتقل لـ auth.openai.com أو يبقي على chatgpt.com
+            for wait_i in range(10):
                 await asyncio.sleep(1)
                 cur = page.url
                 if "auth.openai.com" in cur or "auth0" in cur:
                     log.info("ChatGPT: redirected to auth: %s", cur[:100])
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=12000)
+                    except Exception:
+                        pass
+                    await self._wait_for_sentinel(page, timeout=15.0)
                     break
+                # فحص إذا ظهر نموذج email على chatgpt.com (modal)
+                try:
+                    inp = await page.query_selector(self._OPENAI_EMAIL_SEL)
+                    if inp and await inp.is_visible():
+                        log.info("ChatGPT: email form appeared on chatgpt.com (modal)")
+                        return True
+                except Exception:
+                    pass
             else:
-                log.info("ChatGPT: no auth redirect after 15s, URL=%s", page.url[:80])
-
-            # سواء انتقل لـ auth.openai.com أو بقي، ننتظر networkidle ثم نبحث عن النموذج
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
+                log.info("ChatGPT: URL still %s after 10s", page.url[:80])
 
             await self._log_page_state(page, "after-click")
 
-            # انتظر نموذج الإيميل (قد يكون على chatgpt.com أو auth.openai.com)
-            if await self._wait_for_openai_form(page, timeout_ms=20000):
+            if await self._wait_for_openai_form(page, timeout_ms=15000):
                 return True
 
-        # ===== المرحلة 3: آخر محاولة — URL مع screen_hint=signup =====
+        # ===== المرحلة 3: authorize URL مع screen_hint=signup =====
         log.info("ChatGPT: trying authorize URL with screen_hint=signup")
         try:
             authorize_url = (
@@ -2688,12 +2801,15 @@ class PlaywrightClient:
             )
             await page.goto(authorize_url, timeout=_NAV_TIMEOUT, wait_until="domcontentloaded")
             try:
-                await page.wait_for_load_state("networkidle", timeout=12000)
+                await page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
+
             await self._log_page_state(page, "authorize-url")
+            await self._wait_for_sentinel(page, timeout=20.0)
+
             if "platform.openai.com/login" not in page.url:
-                if await self._wait_for_openai_form(page, timeout_ms=20000):
+                if await self._wait_for_openai_form(page, timeout_ms=15000):
                     return True
         except Exception as exc:
             log.warning("ChatGPT authorize URL error: %s", exc)
