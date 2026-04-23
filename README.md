@@ -57,6 +57,11 @@ The bot will:
 | `GMAIL_OTP_LABEL` | No | Gmail label to search for OTP emails (default: `TO_BOT`) |
 | `DB_PATH` | No | SQLite database path (default: `data/jobs.db`) |
 | `LOG_LEVEL` | No | Logging level (default: `INFO`) |
+| `MEDIA_DOWNLOAD_DIR` | No | Directory for temporary media files (default: `/tmp/media_downloads`) |
+| `MEDIA_MAX_FILE_SIZE_MB` | No | Max file size for Telegram uploads (default: `50`) |
+| `MEDIA_MAX_RETRIES` | No | Download retry attempts (default: `3`) |
+| `MEDIA_RATE_LIMIT` | No | Max downloads per user per window (default: `5`) |
+| `MEDIA_RATE_WINDOW` | No | Rate limit window in seconds (default: `60`) |
 
 ## Deploy to Railway (Docker)
 
@@ -80,6 +85,7 @@ bot_system/
     core/         # Config, logging, utilities, enums
     gmail/        # IMAP Gmail client, OTP parser and matcher
     jobs/         # Job manager and async scheduler
+    media/        # Media download engine (yt-dlp), URL parser, rate limiter
     services/     # Registration service, OTP service, notifications
     site/         # Playwright browser client, HTTP fallback client
     storage/      # SQLite database, models, repositories
@@ -100,3 +106,5 @@ railway.toml      # Railway configuration
 - **Job System**: SQLite-backed job queue with status tracking (pending, creating_account, waiting_for_otp, verifying_otp, completed, failed). Audit logging for all state transitions.
 
 - **Telegram Interface**: Real-time progress updates sent to the user during registration. Supports `/create`, `/status`, `/jobs`, and `/help` commands.
+
+- **Media Downloader**: Downloads video and audio from TikTok, Instagram, YouTube, Twitter/X, Facebook, SoundCloud, Pinterest, Reddit, and Threads using yt-dlp. Features automatic fallback strategies, per-user rate limiting, and file-size validation. Commands: `/dl <url>`, `/mediahelp`, `/mediastats`. Also auto-detects pasted media URLs.
