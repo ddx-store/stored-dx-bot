@@ -19,9 +19,30 @@ from app.bot.commands import (
     load_all_sessions,
     text_handler,
 )
+from app.media.handlers import (
+    cmd_download,
+    cmd_media_help,
+    cmd_media_stats,
+    media_callback_handler,
+    media_url_handler,
+)
 from app.core.logger import get_logger
 
 log = get_logger(__name__)
+
+
+async def _combined_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delegate to media callback first, then fall back to existing handler."""
+    consumed = await media_callback_handler(update, context)
+    if not consumed:
+        await callback_handler(update, context)
+
+
+async def _combined_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Try media URL detection first, then fall back to existing text handler."""
+    consumed = await media_url_handler(update, context)
+    if not consumed:
+        await text_handler(update, context)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -43,7 +64,12 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("accounts", cmd_accounts))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    # Media download commands
+    app.add_handler(CommandHandler("dl", cmd_download))
+    app.add_handler(CommandHandler("mediahelp", cmd_media_help))
+    app.add_handler(CommandHandler("mediastats", cmd_media_stats))
+    # Combined callback and text handlers (media first, then existing)
+    app.add_handler(CallbackQueryHandler(_combined_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _combined_text))
     app.add_error_handler(error_handler)
-    log.info("All handlers registered")
+    log.info("All handlers registered (including media download)")

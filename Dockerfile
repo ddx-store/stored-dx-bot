@@ -3,6 +3,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
+    ffmpeg \
     fonts-liberation \
     fonts-noto-color-emoji \
     libnss3 \
@@ -29,6 +30,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot_system/ .
 
-RUN mkdir -p data
+RUN mkdir -p data /tmp/media_downloads
 
 CMD ["python", "app/main.py"]
